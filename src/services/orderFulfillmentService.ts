@@ -1,0 +1,726 @@
+import { prisma } from "../database/prisma.js";
+import { reserveSenderForOrder } from "./transferService.js";
+import { startTransfer } from "./transferExecutor.js";
+import { executeMockTransfer } from "./robloxTransferService.js";
+import { verifyTransfer } from "./transferVerificationService.js";
+
+export async function fulfillPaidOrder(orderId: number) {
+  console.log("========================================");
+  console.log("START ORDER FULFILLMENT");
+  console.log(`Order ID: ${orderId}`);
+  console.log("========================================");
+
+  let order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: {
+      transfers: {
+        orderBy: {
+          requestedAt: "desc",
+        },
+      },
+    },
+  });
+
+  if (!order) {
+    throw new Error(`Order ${orderId} tidak ditemukan.`);
+  }
+
+  console.log(`Current status: ${order.status}`);
+
+  // ============================================================
+  // COMPLETED
+  // ============================================================
+
+  if (order.status === "COMPLETED") {
+    console.log(`✅ Order ${orderId} sudah COMPLETED.`);
+
+    return {
+      success: true,
+      order,
+      reason: "ALREADY_COMPLETED",
+    };
+  }
+
+  // ============================================================
+  // PAID
+  // ============================================================
+
+  if (order.status === "PAID") {
+    console.log(
+      "📦 Order PAID → memeriksa transfer yang sudah ada...",
+    );
+
+    // ==========================================================
+    // PAID + EXISTING TRANSFER
+    // ==========================================================
+
+    const existingTransfer = order.transfers[0];
+
+    if (existingTransfer) {
+      console.log(
+        `ℹ️ Order ${order.orderNumber} sudah memiliki transfer ${existingTransfer.id}.`,
+      );
+
+      console.log(
+        `Transfer status: ${existingTransfer.status}`,
+      );
+
+      // ========================================================
+      // PENDING
+      // ========================================================
+
+      if (existingTransfer.status === "PENDING") {
+        console.log(
+          "🔄 Existing transfer PENDING → mengubah order menjadi READY_TO_SEND...",
+        );
+
+        order = await prisma.$transaction(
+          async (tx) => {
+            const currentOrder = await tx.order.findUnique({
+              where: { id: orderId },
+            });
+
+            if (!currentOrder) {
+              throw new Error(
+                `Order ${orderId} tidak ditemukan saat recovery PENDING transfer.`,
+              );
+            }
+
+            if (currentOrder.status === "PAID") {
+              const updatedOrder = await tx.order.update({
+                where: { id: orderId },
+                data: {
+                  status: "READY_TO_SEND",
+                },
+                include: {
+                  transfers: {
+                    orderBy: {
+                      requestedAt: "desc",
+                    },
+                  },
+                },
+              });
+
+              await tx.orderEvent.create({
+                data: {
+                  orderId,
+                  eventType: "ORDER_RECOVERY",
+                  oldStatus: "PAID",
+                  newStatus: "READY_TO_SEND",
+                  description:
+                    "Order direcovery berdasarkan transfer PENDING yang sudah ada.",
+                  metadata: {
+                    transferId: existingTransfer.id,
+                    transferStatus: "PENDING",
+                  },
+                },
+              });
+
+              return updatedOrder;
+            }
+
+            return tx.order.findUniqueOrThrow({
+              where: { id: orderId },
+              include: {
+                transfers: {
+                  orderBy: {
+                    requestedAt: "desc",
+                  },
+                },
+              },
+            });
+          },
+          {
+            maxWait: 10000,
+            timeout: 10000,
+          },
+        );
+      }
+
+      // ========================================================
+      // PROCESSING
+      // ========================================================
+
+      else if (existingTransfer.status === "PROCESSING") {
+        console.log(
+          "🔄 Existing transfer PROCESSING → mengubah order menjadi PROCESSING...",
+        );
+
+        order = await prisma.$transaction(
+          async (tx) => {
+            const currentOrder = await tx.order.findUnique({
+              where: { id: orderId },
+            });
+
+            if (!currentOrder) {
+              throw new Error(
+                `Order ${orderId} tidak ditemukan saat recovery PROCESSING transfer.`,
+              );
+            }
+
+            if (currentOrder.status === "PAID") {
+              const updatedOrder = await tx.order.update({
+                where: { id: orderId },
+                data: {
+                  status: "PROCESSING",
+                },
+                include: {
+                  transfers: {
+                    orderBy: {
+                      requestedAt: "desc",
+                    },
+                  },
+                },
+              });
+
+              await tx.orderEvent.create({
+                data: {
+                  orderId,
+                  eventType: "ORDER_RECOVERY",
+                  oldStatus: "PAID",
+                  newStatus: "PROCESSING",
+                  description:
+                    "Order direcovery berdasarkan transfer PROCESSING yang sudah ada.",
+                  metadata: {
+                    transferId: existingTransfer.id,
+                    transferStatus: "PROCESSING",
+                  },
+                },
+              });
+
+              return updatedOrder;
+            }
+
+            return tx.order.findUniqueOrThrow({
+              where: { id: orderId },
+              include: {
+                transfers: {
+                  orderBy: {
+                    requestedAt: "desc",
+                  },
+                },
+              },
+            });
+          },
+          {
+            maxWait: 10000,
+            timeout: 10000,
+          },
+        );
+      }
+
+      // ========================================================
+      // SUCCESS
+      // ========================================================
+
+      else if (existingTransfer.status === "SUCCESS") {
+        console.log(
+          "✅ Existing transfer SUCCESS → mengubah order menjadi VERIFYING...",
+        );
+
+        order = await prisma.$transaction(
+          async (tx) => {
+            const currentOrder = await tx.order.findUnique({
+              where: { id: orderId },
+            });
+
+            if (!currentOrder) {
+              throw new Error(
+                `Order ${orderId} tidak ditemukan saat recovery SUCCESS transfer.`,
+              );
+            }
+
+            if (currentOrder.status === "PAID") {
+              const updatedOrder = await tx.order.update({
+                where: { id: orderId },
+                data: {
+                  status: "VERIFYING",
+                },
+                include: {
+                  transfers: {
+                    orderBy: {
+                      requestedAt: "desc",
+                    },
+                  },
+                },
+              });
+
+              await tx.orderEvent.create({
+                data: {
+                  orderId,
+                  eventType: "ORDER_RECOVERY",
+                  oldStatus: "PAID",
+                  newStatus: "VERIFYING",
+                  description:
+                    "Order direcovery berdasarkan transfer SUCCESS yang sudah ada.",
+                  metadata: {
+                    transferId: existingTransfer.id,
+                    externalTransferId:
+                      existingTransfer.externalTransferId,
+                    transferStatus: "SUCCESS",
+                  },
+                },
+              });
+
+              return updatedOrder;
+            }
+
+            return tx.order.findUniqueOrThrow({
+              where: { id: orderId },
+              include: {
+                transfers: {
+                  orderBy: {
+                    requestedAt: "desc",
+                  },
+                },
+              },
+            });
+          },
+          {
+            maxWait: 10000,
+            timeout: 10000,
+          },
+        );
+      }
+
+      // ========================================================
+      // FAILED
+      // ========================================================
+
+      else if (existingTransfer.status === "FAILED") {
+        console.log(
+          "❌ Existing transfer FAILED → mengubah order menjadi TRANSFER_FAILED...",
+        );
+
+        order = await prisma.$transaction(
+          async (tx) => {
+            const currentOrder = await tx.order.findUnique({
+              where: { id: orderId },
+            });
+
+            if (!currentOrder) {
+              throw new Error(
+                `Order ${orderId} tidak ditemukan saat recovery FAILED transfer.`,
+              );
+            }
+
+            if (currentOrder.status === "PAID") {
+              const updatedOrder = await tx.order.update({
+                where: { id: orderId },
+                data: {
+                  status: "TRANSFER_FAILED",
+                },
+                include: {
+                  transfers: {
+                    orderBy: {
+                      requestedAt: "desc",
+                    },
+                  },
+                },
+              });
+
+              await tx.orderEvent.create({
+                data: {
+                  orderId,
+                  eventType: "ORDER_RECOVERY",
+                  oldStatus: "PAID",
+                  newStatus: "TRANSFER_FAILED",
+                  description:
+                    "Order direcovery berdasarkan transfer FAILED yang sudah ada.",
+                  metadata: {
+                    transferId: existingTransfer.id,
+                    errorCode: existingTransfer.errorCode,
+                    errorMessage: existingTransfer.errorMessage,
+                    transferStatus: "FAILED",
+                  },
+                },
+              });
+
+              return updatedOrder;
+            }
+
+            return tx.order.findUniqueOrThrow({
+              where: { id: orderId },
+              include: {
+                transfers: {
+                  orderBy: {
+                    requestedAt: "desc",
+                  },
+                },
+              },
+            });
+          },
+          {
+            maxWait: 10000,
+            timeout: 10000,
+          },
+        );
+      }
+    }
+
+    // ==========================================================
+    // PAID + NO EXISTING TRANSFER
+    // ==========================================================
+
+    else {
+      console.log(
+        "📦 Tidak ada transfer → melakukan sender reservation...",
+      );
+
+      const reservation = await reserveSenderForOrder(orderId);
+
+      // ========================================================
+      // SENDER TIDAK TERSEDIA
+      // ========================================================
+
+      if (!reservation) {
+        console.log(
+          `❌ Sender tidak tersedia untuk order ${orderId}`,
+        );
+
+        const updatedOrder = await prisma.$transaction(
+          async (tx) => {
+            const currentOrder = await tx.order.findUnique({
+              where: { id: orderId },
+            });
+
+            if (!currentOrder) {
+              throw new Error(
+                `Order ${orderId} tidak ditemukan saat update sender limit.`,
+              );
+            }
+
+            // Jangan overwrite jika proses lain sudah mengubah status
+            if (currentOrder.status !== "PAID") {
+              return tx.order.findUniqueOrThrow({
+                where: { id: orderId },
+                include: {
+                  transfers: {
+                    orderBy: {
+                      requestedAt: "desc",
+                    },
+                  },
+                },
+              });
+            }
+
+            const updated = await tx.order.update({
+              where: { id: orderId },
+              data: {
+                status: "SENDER_LIMIT_ERROR",
+              },
+              include: {
+                transfers: {
+                  orderBy: {
+                    requestedAt: "desc",
+                  },
+                },
+              },
+            });
+
+            await tx.orderEvent.create({
+              data: {
+                orderId,
+                eventType: "SENDER_LIMIT_REACHED",
+                oldStatus: "PAID",
+                newStatus: "SENDER_LIMIT_ERROR",
+                description:
+                  "Tidak ada sender yang tersedia karena limit pengiriman Robux telah tercapai.",
+                metadata: {
+                  reason: "SENDER_UNAVAILABLE",
+                },
+              },
+            });
+
+            return updated;
+          },
+          {
+            maxWait: 10000,
+            timeout: 10000,
+          },
+        );
+
+        console.log(
+          `⚠️ Order ${orderId} diubah menjadi SENDER_LIMIT_ERROR.`,
+        );
+
+        return {
+          success: false,
+          reason: "SENDER_UNAVAILABLE",
+          order: updatedOrder,
+        };
+      }
+
+      // ========================================================
+      // SENDER BERHASIL DI-RESERVE
+      // ========================================================
+
+      if (!reservation.sender) {
+        throw new Error(
+          `Sender reservation untuk order ${orderId} tidak memiliki sender.`,
+        );
+      }
+
+      console.log(
+        `✅ Sender reserved: ${reservation.sender.accountName}`,
+      );
+
+      // Refresh order setelah reservation
+      order = await prisma.order.findUnique({
+        where: { id: orderId },
+        include: {
+          transfers: {
+            orderBy: {
+              requestedAt: "desc",
+            },
+          },
+        },
+      });
+
+      if (!order) {
+        throw new Error(
+          `Order ${orderId} tidak ditemukan setelah sender reservation.`,
+        );
+      }
+    }
+  }
+
+  // ============================================================
+  // READY_TO_SEND
+  // ============================================================
+
+  if (order.status === "READY_TO_SEND") {
+    console.log(
+      "📦 Order READY_TO_SEND → mencari transfer PENDING...",
+    );
+
+    const pendingTransfer = order.transfers.find(
+      (transfer) => transfer.status === "PENDING",
+    );
+
+    if (!pendingTransfer) {
+      throw new Error(
+        `Order ${orderId} READY_TO_SEND tetapi tidak memiliki transfer PENDING.`,
+      );
+    }
+
+    console.log(
+      `✅ Transfer PENDING ditemukan: ${pendingTransfer.id}`,
+    );
+
+    const startedTransfer = await startTransfer(orderId);
+
+    console.log(
+      `✅ Transfer started: ${startedTransfer.transfer.id}`,
+    );
+
+    // Refresh order
+    order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        transfers: {
+          orderBy: {
+            requestedAt: "desc",
+          },
+        },
+      },
+    });
+
+    if (!order) {
+      throw new Error(
+        `Order ${orderId} tidak ditemukan setelah transfer dimulai.`,
+      );
+    }
+  }
+
+  // ============================================================
+  // PROCESSING
+  // ============================================================
+
+  if (order.status === "PROCESSING") {
+    console.log(
+      "⚙️ Order PROCESSING → mencari transfer PROCESSING...",
+    );
+
+    const processingTransfer = order.transfers.find(
+      (transfer) => transfer.status === "PROCESSING",
+    );
+
+    if (!processingTransfer) {
+      throw new Error(
+        `Order ${orderId} PROCESSING tetapi tidak memiliki transfer PROCESSING.`,
+      );
+    }
+
+    console.log(
+      `🔄 Melanjutkan transfer: ${processingTransfer.id}`,
+    );
+
+    const simulateMockFailure = process.env.MOCK_TRANSFER_FAIL === "true";
+
+    const completedTransfer = await executeMockTransfer(
+      processingTransfer.id,
+      simulateMockFailure
+        ? {
+            simulateFailure: true,
+            failureMessage: "Simulasi transfer gagal untuk testing.",
+          }
+        : {},
+    );
+
+    // ==========================================================
+    // TRANSFER FAILED
+    // ==========================================================
+
+    if (completedTransfer.status === "FAILED") {
+      console.log(
+        `❌ Transfer gagal: ${completedTransfer.id}`,
+      );
+
+      return {
+        success: false,
+        reason: "TRANSFER_FAILED",
+        orderId,
+        transfer: completedTransfer,
+      };
+    }
+
+    console.log(
+      `✅ Mock transfer success: ${completedTransfer.id}`,
+    );
+
+    // Refresh order
+    order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        transfers: {
+          orderBy: {
+            requestedAt: "desc",
+          },
+        },
+      },
+    });
+
+    if (!order) {
+      throw new Error(
+        `Order ${orderId} tidak ditemukan setelah mock transfer.`,
+      );
+    }
+  }
+
+  // ============================================================
+  // VERIFYING
+  // ============================================================
+
+  if (order.status === "VERIFYING") {
+    console.log(
+      "🔍 Order VERIFYING → mencari transfer SUCCESS...",
+    );
+
+    const successfulTransfer = order.transfers.find(
+      (transfer) => transfer.status === "SUCCESS",
+    );
+
+    if (!successfulTransfer) {
+      throw new Error(
+        `Order ${orderId} VERIFYING tetapi tidak memiliki transfer SUCCESS.`,
+      );
+    }
+
+    console.log(
+      `✅ Transfer SUCCESS ditemukan: ${successfulTransfer.id}`,
+    );
+
+    const completedOrder = await verifyTransfer(
+      successfulTransfer.id,
+    );
+
+    console.log("================================");
+    console.log("TRANSFER VERIFIED");
+    console.log("================================");
+    console.log(`Order: ${completedOrder.orderNumber}`);
+    console.log(`Transfer ID: ${successfulTransfer.id}`);
+    console.log(
+      `External Transfer ID: ${successfulTransfer.externalTransferId}`,
+    );
+    console.log(`Robux: ${successfulTransfer.robuxAmount}`);
+    console.log(`Status: ${completedOrder.status}`);
+    console.log("================================");
+
+    console.log(
+      `🎉 Order completed: ${completedOrder.orderNumber}`,
+    );
+
+    console.log("========================================");
+    console.log("ORDER FULFILLMENT COMPLETED");
+    console.log("========================================");
+
+    return {
+      success: true,
+      order: completedOrder,
+      transfer: successfulTransfer,
+    };
+  }
+
+  // ============================================================
+  // COMPLETED
+  // ============================================================
+
+  if (order.status === "COMPLETED") {
+    console.log(
+      `✅ Order ${orderId} sudah COMPLETED.`,
+    );
+
+    return {
+      success: true,
+      order,
+      reason: "COMPLETED",
+    };
+  }
+
+  // ============================================================
+  // SENDER LIMIT ERROR
+  // ============================================================
+
+  if (order.status === "SENDER_LIMIT_ERROR") {
+    console.log(
+      `⚠️ Order ${orderId} berada pada SENDER_LIMIT_ERROR.`,
+    );
+
+    return {
+      success: false,
+      reason: "SENDER_LIMIT_ERROR",
+      order,
+    };
+  }
+
+  // ============================================================
+  // TRANSFER FAILED
+  // ============================================================
+
+  if (order.status === "TRANSFER_FAILED") {
+    console.log(
+      `❌ Order ${orderId} berada pada TRANSFER_FAILED.`,
+    );
+
+    return {
+      success: false,
+      reason: "TRANSFER_FAILED",
+      order,
+    };
+  }
+
+  // ============================================================
+  // UNSUPPORTED STATUS
+  // ============================================================
+
+  console.log("⚠️ Fulfillment berhenti.");
+  console.log(`Order: ${order.orderNumber}`);
+  console.log(`Status: ${order.status}`);
+
+  return {
+    success: false,
+    reason: "UNSUPPORTED_ORDER_STATUS",
+    order,
+  };
+}

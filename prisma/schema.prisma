@@ -1,0 +1,219 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id              Int      @id @default(autoincrement())
+  discordUserId   String   @unique
+  discordUsername String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  orders          Order[]
+}
+
+model RobloxProfile {
+  id           Int       @id @default(autoincrement())
+  robloxUserId String    @unique
+  username     String
+  displayName  String
+  avatarUrl    String?
+  lastChecked  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  orders       Order[]
+}
+
+model Order {
+  id              Int           @id @default(autoincrement())
+  orderNumber     String        @unique
+  userId          Int
+  robuxAmount     Int
+  totalAmount     Int
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  cancelledAt     DateTime?
+  completedAt     DateTime?
+  paidAt          DateTime?
+  paymentFee      Int           @default(0)
+  productPrice    Int
+  robloxProfileId Int
+  status          OrderStatus   @default(CREATED)
+  adminActions    AdminAction[]
+  robloxProfile   RobloxProfile @relation(fields: [robloxProfileId], references: [id])
+  user            User          @relation(fields: [userId], references: [id])
+  events          OrderEvent[]
+  payment         Payment?
+  ticket          Ticket?
+  transfers       Transfer[]
+
+  @@index([userId])
+  @@index([robloxProfileId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Payment {
+  id              Int           @id @default(autoincrement())
+  orderId         Int           @unique
+  provider        String        @default("MIDTRANS")
+  midtransOrderId String        @unique
+  transactionId   String?       @unique
+  grossAmount     Int
+  paymentMethod   String?
+  status          PaymentStatus @default(PENDING)
+  signatureValid  Boolean       @default(false)
+  rawNotification Json?
+  createdAt       DateTime      @default(now())
+  paidAt          DateTime?
+  expiredAt       DateTime?
+  order           Order         @relation(fields: [orderId], references: [id])
+
+  @@index([status])
+}
+
+model SenderAccount {
+  id             Int          @id @default(autoincrement())
+  accountName    String
+  robloxUserId   String       @unique
+  status         SenderStatus @default(ACTIVE)
+  dailyLimit     Int          @default(500)
+  monthlyLimit   Int          @default(1000)
+  dailyUsed      Int          @default(0)
+  monthlyUsed    Int          @default(0)
+  dailyResetAt   DateTime?
+  monthlyResetAt DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  transfers      Transfer[]
+
+  @@index([status])
+}
+
+model Transfer {
+  id                 Int            @id @default(autoincrement())
+  orderId            Int
+  senderAccountId    Int
+  recipientRobloxId  String
+  robuxAmount        Int
+  status             TransferStatus @default(PENDING)
+  externalTransferId String?
+  attemptCount       Int            @default(0)
+  errorCode          String?
+  errorMessage       String?
+  requestedAt        DateTime       @default(now())
+  completedAt        DateTime?
+  order              Order          @relation(fields: [orderId], references: [id])
+  senderAccount      SenderAccount  @relation(fields: [senderAccountId], references: [id])
+
+  @@index([orderId])
+  @@index([senderAccountId])
+  @@index([status])
+}
+
+model Ticket {
+  id               Int          @id @default(autoincrement())
+  orderId          Int          @unique
+  guildId          String
+  channelId        String       @unique
+  status           TicketStatus @default(OPEN)
+  supportRequested Boolean      @default(false)
+  createdAt        DateTime     @default(now())
+  closedAt         DateTime?
+  messageId        String?
+  order            Order        @relation(fields: [orderId], references: [id])
+
+  @@index([status])
+}
+
+model OrderEvent {
+  id          Int      @id @default(autoincrement())
+  orderId     Int
+  eventType   String
+  oldStatus   String?
+  newStatus   String?
+  description String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  order       Order    @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+  @@index([eventType])
+  @@index([createdAt])
+}
+
+model AdminAction {
+  id             Int      @id @default(autoincrement())
+  orderId        Int
+  adminDiscordId String
+  action         String
+  oldStatus      String?
+  newStatus      String?
+  reason         String?
+  createdAt      DateTime @default(now())
+  order          Order    @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+  @@index([adminDiscordId])
+  @@index([createdAt])
+}
+
+model SystemSetting {
+  id        Int      @id @default(autoincrement())
+  key       String   @unique
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum OrderStatus {
+  CREATED
+  WAITING_PROFILE_CONFIRMATION
+  WAITING_PAYMENT
+  PAYMENT_PENDING
+  PAID
+  CHECKING_SENDER
+  READY_TO_SEND
+  PROCESSING
+  VERIFYING
+  COMPLETED
+  PAYMENT_TIMEOUT
+  PAYMENT_FAILED
+  SENDER_LIMIT_ERROR
+  TRANSFER_FAILED
+  MANUAL_REVIEW
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  EXPIRED
+  FAILED
+  REFUNDED
+}
+
+enum SenderStatus {
+  ACTIVE
+  DISABLED
+  LIMIT_REACHED
+  ERROR
+  MAINTENANCE
+}
+
+enum TransferStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  MANUAL_REVIEW
+}
+
+enum TicketStatus {
+  OPEN
+  CLOSED
+  ARCHIVED
+}

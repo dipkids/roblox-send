@@ -1,6 +1,7 @@
 import { prisma } from "../database/prisma.js";
 import { executeMockTransfer } from "./robloxTransferService.js";
 import { verifyTransfer } from "./transferVerificationService.js";
+import { notifyAdminOrder, kindFromErrorCode } from "./adminNotificationService.js";
 
 const MAX_RETRY = 3;
 
@@ -77,6 +78,7 @@ export async function retryFailedTransfer(
         kind: "MAX_RETRY";
         transferId: number;
         attemptCount: number;
+        errorCode: string | null;
       }
     | {
         kind: "NOT_RETRYABLE";
@@ -223,6 +225,7 @@ export async function retryFailedTransfer(
           kind: "MAX_RETRY",
           transferId: failedTransfer.id,
           attemptCount: failedTransfer.attemptCount,
+          errorCode: failedTransfer.errorCode,
         };
       }
 
@@ -284,8 +287,8 @@ export async function retryFailedTransfer(
       };
     },
     {
-      maxWait: 10000,
-      timeout: 10000,
+      maxWait: 30000,
+      timeout: 30000,
     },
   );
 
@@ -316,6 +319,12 @@ export async function retryFailedTransfer(
     console.log(
       `📌 Order ${orderId} dipindahkan ke MANUAL_REVIEW.`,
     );
+
+    await notifyAdminOrder({
+      orderId,
+      kind: kindFromErrorCode(outcome.errorCode),
+      detail: `Transfer ${outcome.transferId} gagal ${outcome.attemptCount}x (error: ${outcome.errorCode ?? "tanpa kode"}).`,
+    });
 
     return {
       success: false,

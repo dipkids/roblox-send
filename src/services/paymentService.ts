@@ -23,7 +23,7 @@ interface MidtransQrisResponse {
   actions?: MidtransQrisAction[];
 }
 
-function getMidtransConfig() {
+export function getMidtransConfig() {
   const serverKey = process.env.MIDTRANS_SERVER_KEY;
 
   if (!serverKey) {

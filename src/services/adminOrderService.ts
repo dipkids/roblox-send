@@ -1,9 +1,14 @@
 import { prisma } from "../database/prisma.js";
 
+export const ADMIN_REVIEW_STATUSES = [
+  "MANUAL_REVIEW",
+  "SENDER_LIMIT_ERROR",
+] as const;
+
 export async function getManualReviewOrders() {
   return prisma.order.findMany({
     where: {
-      status: "MANUAL_REVIEW",
+      status: { in: [...ADMIN_REVIEW_STATUSES] },
     },
     include: {
       user: true,
@@ -28,7 +33,7 @@ export async function getManualReviewOrder(
   return prisma.order.findFirst({
     where: {
       id: orderId,
-      status: "MANUAL_REVIEW",
+      status: { in: [...ADMIN_REVIEW_STATUSES] },
     },
     include: {
       user: true,
@@ -65,10 +70,7 @@ export async function acknowledgeManualReview(
   return prisma.$transaction(
     async (tx) => {
       const lockedOrders = await tx.$queryRaw<
-        Array<{
-          id: number;
-          status: string;
-        }>
+        Array<{ id: number; status: string }>
       >`
         SELECT id, status
         FROM "Order"
@@ -82,22 +84,23 @@ export async function acknowledgeManualReview(
 
       const order = lockedOrders[0];
 
-      if (order.status !== "MANUAL_REVIEW") {
+      if (
+        !(ADMIN_REVIEW_STATUSES as readonly string[]).includes(order.status)
+      ) {
         throw new Error(
-          `Order tidak lagi berstatus MANUAL_REVIEW. Status sekarang: ${order.status}`,
+          `Order tidak lagi membutuhkan pemeriksaan admin. Status sekarang: ${order.status}`,
         );
       }
 
-      const reason =
-        "Admin telah memeriksa detail order MANUAL_REVIEW.";
+      const reason = "Admin telah memeriksa detail order.";
 
       await tx.adminAction.create({
         data: {
           orderId,
           adminDiscordId,
           action: "REVIEW_ACKNOWLEDGED",
-          oldStatus: "MANUAL_REVIEW",
-          newStatus: "MANUAL_REVIEW",
+          oldStatus: order.status,
+          newStatus: order.status,
           reason,
         },
       });
@@ -106,23 +109,15 @@ export async function acknowledgeManualReview(
         data: {
           orderId,
           eventType: "ADMIN_REVIEW_ACKNOWLEDGED",
-          oldStatus: "MANUAL_REVIEW",
-          newStatus: "MANUAL_REVIEW",
+          oldStatus: order.status,
+          newStatus: order.status,
           description: reason,
-          metadata: {
-            adminDiscordId,
-          },
+          metadata: { adminDiscordId },
         },
       });
 
-      return {
-        orderId,
-        status: "MANUAL_REVIEW" as const,
-      };
+      return { orderId, status: order.status };
     },
-    {
-      maxWait: 10000,
-      timeout: 10000,
-    },
+    { maxWait: 30000, timeout: 30000 },
   );
 }

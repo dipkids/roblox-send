@@ -3,8 +3,33 @@ import { reserveSenderForOrder } from "./transferService.js";
 import { startTransfer } from "./transferExecutor.js";
 import { executeMockTransfer } from "./robloxTransferService.js";
 import { verifyTransfer } from "./transferVerificationService.js";
+import { notifyAdminOrder } from "./adminNotificationService.js";
+import { handleTransferFailure, type FailureOrigin, } from "./transferFailureService.js";
 
-export async function fulfillPaidOrder(orderId: number) {
+const inFlight = new Set<number>();
+
+export async function fulfillPaidOrder(orderId: number, origin: FailureOrigin = "AUTO") {
+  if (inFlight.has(orderId)) {
+    console.log(
+      `⏭️ Order ${orderId} sedang diproses proses lain. Skip.`,
+    );
+
+    return {
+      success: false as const,
+      reason: "ALREADY_IN_PROGRESS" as const,
+    };
+  }
+
+  inFlight.add(orderId);
+
+  try {
+    return await runFulfillment(orderId, origin);
+  } finally {
+    inFlight.delete(orderId);
+  }
+}
+
+async function runFulfillment(orderId: number, origin: FailureOrigin) {
   console.log("========================================");
   console.log("START ORDER FULFILLMENT");
   console.log(`Order ID: ${orderId}`);
@@ -131,8 +156,8 @@ export async function fulfillPaidOrder(orderId: number) {
             });
           },
           {
-            maxWait: 10000,
-            timeout: 10000,
+            maxWait: 30000,
+            timeout: 30000,
           },
         );
       }
@@ -203,8 +228,8 @@ export async function fulfillPaidOrder(orderId: number) {
             });
           },
           {
-            maxWait: 10000,
-            timeout: 10000,
+            maxWait: 30000,
+            timeout: 30000,
           },
         );
       }
@@ -277,8 +302,8 @@ export async function fulfillPaidOrder(orderId: number) {
             });
           },
           {
-            maxWait: 10000,
-            timeout: 10000,
+            maxWait: 30000,
+            timeout: 30000,
           },
         );
       }
@@ -351,10 +376,11 @@ export async function fulfillPaidOrder(orderId: number) {
             });
           },
           {
-            maxWait: 10000,
-            timeout: 10000,
+            maxWait: 30000,
+            timeout: 30000,
           },
         );
+        await handleTransferFailure({ orderId, origin });
       }
     }
 
@@ -435,14 +461,20 @@ export async function fulfillPaidOrder(orderId: number) {
             return updated;
           },
           {
-            maxWait: 10000,
-            timeout: 10000,
+            maxWait: 30000,
+            timeout: 30000,
           },
         );
 
         console.log(
           `⚠️ Order ${orderId} diubah menjadi SENDER_LIMIT_ERROR.`,
         );
+
+        await notifyAdminOrder({
+          orderId,
+          kind: "SENDER_LIMIT",
+          detail: `Tidak ada sender aktif dengan kuota minimal ${updatedOrder.robuxAmount} Robux.`,
+        });
 
         return {
           success: false,
@@ -576,6 +608,8 @@ export async function fulfillPaidOrder(orderId: number) {
       console.log(
         `❌ Transfer gagal: ${completedTransfer.id}`,
       );
+
+      await handleTransferFailure({ orderId, origin });
 
       return {
         success: false,

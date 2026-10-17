@@ -1,32 +1,18 @@
 import crypto from "node:crypto";
 
-import { Prisma, } from "@prisma/client";
-
-import {
-  Router,
-  Request,
-  Response,
-} from "express";
+import { Prisma } from "@prisma/client";
+import { Router, Request, Response } from "express";
 
 import { prisma } from "../database/prisma.js";
-
-import {
-  updateTicketPaymentSuccess,
-} from "../services/ticketService.js";
-
-import {
-  fulfillPaidOrder,
-} from "../services/orderFulfillmentService.js";
+import { updateTicketPaymentSuccess } from "../services/ticketService.js";
+import { fulfillPaidOrder } from "../services/orderFulfillmentService.js";
+import { notifyAdminOrder } from "../services/adminNotificationService.js";
 
 const router = Router();
 
-let discordClient:
-  import("discord.js").Client | null =
-  null;
+let discordClient: import("discord.js").Client | null = null;
 
-export function setDiscordClient(
-  client: import("discord.js").Client,
-) {
+export function setDiscordClient(client: import("discord.js").Client) {
   discordClient = client;
 }
 
@@ -46,50 +32,12 @@ interface MidtransNotification {
   expiry_time?: string;
 }
 
-// ======================================================
-// VERIFY MIDTRANS SIGNATURE
-// ======================================================
-
-function verifySignature(
-  notification: MidtransNotification,
-): boolean {
-  const serverKey =
-    process.env.MIDTRANS_SERVER_KEY;
-
-  if (!serverKey) {
-    throw new Error(
-      "MIDTRANS_SERVER_KEY belum diatur di .env",
-    );
-  }
-
-  if (
-    !notification.order_id ||
-    !notification.status_code ||
-    !notification.gross_amount ||
-    !notification.signature_key
-  ) {
-    return false;
-  }
-
-  const rawSignature =
-    notification.order_id +
-    notification.status_code +
-    notification.gross_amount +
-    serverKey;
-
-  const calculatedSignature =
-    crypto
-      .createHash("sha512")
-      .update(rawSignature)
-      .digest("hex");
-
-  return calculatedSignature ===
-    notification.signature_key;
-}
-
-// ======================================================
-// ORDER STATUS HELPERS
-// ======================================================
+type PaymentStatusValue =
+  | "PENDING"
+  | "PAID"
+  | "EXPIRED"
+  | "FAILED"
+  | "REFUNDED";
 
 type OrderStatus =
   | "CREATED"
@@ -109,836 +57,443 @@ type OrderStatus =
   | "MANUAL_REVIEW"
   | "CANCELLED";
 
-/**
- * Hanya status payment-related yang boleh diubah
- * langsung oleh webhook pembayaran.
- *
- * Status fulfillment yang sudah lebih maju TIDAK
- * boleh diturunkan kembali menjadi PAID.
- */
-function resolveOrderStatus(
-  currentStatus: OrderStatus,
-  paymentStatus:
-    | "PENDING"
-    | "PAID"
-    | "EXPIRED"
-    | "FAILED"
-    | "REFUNDED",
-  requestedOrderStatus:
-    | "PAYMENT_PENDING"
-    | "PAID"
-    | "PAYMENT_TIMEOUT"
-    | "PAYMENT_FAILED",
-): OrderStatus {
-  // ====================================================
-  // PAYMENT PAID
-  // ====================================================
+// ======================================================
+// SIGNATURE
+// ======================================================
 
-  if (paymentStatus === "PAID") {
-    switch (currentStatus) {
-      // Order masih berada di tahap pembayaran.
-      // Aman untuk berubah menjadi PAID.
-      case "CREATED":
-      case "WAITING_PROFILE_CONFIRMATION":
-      case "WAITING_PAYMENT":
-      case "PAYMENT_PENDING":
-      case "PAID":
-        return requestedOrderStatus === "PAID"
-          ? "PAID"
-          : currentStatus;
+function verifySignature(notification: MidtransNotification): boolean {
+  const serverKey = process.env.MIDTRANS_SERVER_KEY;
 
-      // =================================================
-      // FULFILLMENT SUDAH BERJALAN
-      // =================================================
-      //
-      // JANGAN pernah downgrade ke PAID.
-      //
-      case "CHECKING_SENDER":
-      case "READY_TO_SEND":
-      case "PROCESSING":
-      case "VERIFYING":
-      case "COMPLETED":
-      case "SENDER_LIMIT_ERROR":
-      case "TRANSFER_FAILED":
-      case "MANUAL_REVIEW":
-      case "CANCELLED":
-        return currentStatus;
-
-      default:
-        return currentStatus;
-    }
+  if (!serverKey) {
+    throw new Error("MIDTRANS_SERVER_KEY belum diatur di .env");
   }
 
-  // ====================================================
-  // PAYMENT PENDING
-  // ====================================================
-
-  if (paymentStatus === "PENDING") {
-    // Kalau fulfillment sudah berjalan, jangan mundur.
-    if (
-      currentStatus === "CHECKING_SENDER" ||
-      currentStatus === "READY_TO_SEND" ||
-      currentStatus === "PROCESSING" ||
-      currentStatus === "VERIFYING" ||
-      currentStatus === "COMPLETED" ||
-      currentStatus === "SENDER_LIMIT_ERROR" ||
-      currentStatus === "TRANSFER_FAILED" ||
-      currentStatus === "MANUAL_REVIEW" ||
-      currentStatus === "CANCELLED"
-    ) {
-      return currentStatus;
-    }
-
-    return requestedOrderStatus ===
-      "PAYMENT_PENDING"
-      ? "PAYMENT_PENDING"
-      : currentStatus;
+  if (
+    !notification.order_id ||
+    !notification.status_code ||
+    !notification.gross_amount ||
+    !notification.signature_key
+  ) {
+    return false;
   }
 
-  // ====================================================
-  // PAYMENT EXPIRED
-  // ====================================================
+  const calculated = crypto
+    .createHash("sha512")
+    .update(
+      notification.order_id +
+        notification.status_code +
+        notification.gross_amount +
+        serverKey,
+    )
+    .digest("hex");
 
-  if (paymentStatus === "EXPIRED") {
-    // Payment expired tidak boleh membatalkan fulfillment
-    // yang sudah berhasil/berjalan.
-    if (
-      currentStatus === "CHECKING_SENDER" ||
-      currentStatus === "READY_TO_SEND" ||
-      currentStatus === "PROCESSING" ||
-      currentStatus === "VERIFYING" ||
-      currentStatus === "COMPLETED" ||
-      currentStatus === "SENDER_LIMIT_ERROR" ||
-      currentStatus === "TRANSFER_FAILED" ||
-      currentStatus === "MANUAL_REVIEW" ||
-      currentStatus === "CANCELLED"
-    ) {
-      return currentStatus;
-    }
+  const expected = Buffer.from(calculated);
+  const received = Buffer.from(notification.signature_key);
 
-    return requestedOrderStatus ===
-      "PAYMENT_TIMEOUT"
-      ? "PAYMENT_TIMEOUT"
-      : currentStatus;
-  }
-
-  // ====================================================
-  // PAYMENT FAILED
-  // ====================================================
-
-  if (paymentStatus === "FAILED") {
-    // Jangan merusak fulfillment yang sudah berjalan.
-    if (
-      currentStatus === "CHECKING_SENDER" ||
-      currentStatus === "READY_TO_SEND" ||
-      currentStatus === "PROCESSING" ||
-      currentStatus === "VERIFYING" ||
-      currentStatus === "COMPLETED" ||
-      currentStatus === "SENDER_LIMIT_ERROR" ||
-      currentStatus === "TRANSFER_FAILED" ||
-      currentStatus === "MANUAL_REVIEW" ||
-      currentStatus === "CANCELLED"
-    ) {
-      return currentStatus;
-    }
-
-    return requestedOrderStatus ===
-      "PAYMENT_FAILED"
-      ? "PAYMENT_FAILED"
-      : currentStatus;
-  }
-
-  // ====================================================
-  // REFUNDED
-  // ====================================================
-  //
-  // Payment bisa berubah menjadi REFUNDED, tetapi
-  // status fulfillment tidak kita ubah di sini.
-  // ====================================================
-
-  if (paymentStatus === "REFUNDED") {
-    return currentStatus;
-  }
-
-  return currentStatus;
+  return (
+    expected.length === received.length &&
+    crypto.timingSafeEqual(expected, received)
+  );
 }
 
 // ======================================================
-// MIDTRANS WEBHOOK
+// ATURAN STATUS
 // ======================================================
 
-router.post(
-  "/midtrans",
-  async (
-    req: Request,
-    res: Response,
-  ) => {
+// Order yang masih berada di tahap pembayaran.
+const PAYMENT_STAGE: readonly OrderStatus[] = [
+  "CREATED",
+  "WAITING_PROFILE_CONFIRMATION",
+  "WAITING_PAYMENT",
+  "PAYMENT_PENDING",
+];
+
+// Order yang sudah dianggap selesai tanpa pembayaran.
+const DEAD_STATUSES: readonly OrderStatus[] = [
+  "PAYMENT_TIMEOUT",
+  "PAYMENT_FAILED",
+  "CANCELLED",
+];
+
+// Status pembayaran hanya boleh maju, tidak pernah mundur.
+const PAYMENT_RANK: Record<PaymentStatusValue, number> = {
+  PENDING: 0,
+  EXPIRED: 1,
+  FAILED: 1,
+  PAID: 2,
+  REFUNDED: 3,
+};
+
+function resolvePaymentStatus(
+  current: PaymentStatusValue,
+  incoming: PaymentStatusValue,
+): PaymentStatusValue {
+  return PAYMENT_RANK[incoming] >= PAYMENT_RANK[current] ? incoming : current;
+}
+
+function resolveOrderStatus(
+  currentOrder: OrderStatus,
+  effectivePayment: PaymentStatusValue,
+  previousPayment: PaymentStatusValue,
+): OrderStatus {
+  const inPaymentStage = PAYMENT_STAGE.includes(currentOrder);
+
+  switch (effectivePayment) {
+    case "PAID":
+      if (inPaymentStage) return "PAID";
+
+      // Uang masuk untuk order yang sudah dianggap mati:
+      // jangan diam-diam diabaikan, minta admin memeriksa.
+      // Hanya saat pembayaran baru berubah jadi PAID, supaya
+      // notifikasi duplikat tidak membuka kembali order yang
+      // sudah dibatalkan admin.
+      if (DEAD_STATUSES.includes(currentOrder) && previousPayment !== "PAID") {
+        return "MANUAL_REVIEW";
+      }
+
+      return currentOrder;
+
+    case "PENDING":
+      return inPaymentStage ? "PAYMENT_PENDING" : currentOrder;
+
+    case "EXPIRED":
+      return inPaymentStage ? "PAYMENT_TIMEOUT" : currentOrder;
+
+    case "FAILED":
+      return inPaymentStage ? "PAYMENT_FAILED" : currentOrder;
+
+    default:
+      // REFUNDED: status fulfillment tidak diubah di sini.
+      return currentOrder;
+  }
+}
+
+function mapTransactionStatus(status?: string): PaymentStatusValue | null {
+  switch (status) {
+    case "settlement":
+      return "PAID";
+    case "pending":
+      return "PENDING";
+    case "expire":
+      return "EXPIRED";
+    case "deny":
+    case "cancel":
+    case "failure":
+      return "FAILED";
+    case "refund":
+    case "partial_refund":
+      return "REFUNDED";
+    default:
+      return null;
+  }
+}
+
+// ======================================================
+// PEKERJAAN SETELAH MIDTRANS DIBALAS
+// ======================================================
+
+async function runPostWork(params: {
+  orderId: number;
+  incoming: PaymentStatusValue;
+  nextOrder: OrderStatus;
+  previousOrder: OrderStatus;
+  latePayment: boolean;
+}) {
+  if (params.latePayment) {
+    await notifyAdminOrder({
+      orderId: params.orderId,
+      kind: "MANUAL_REVIEW",
+      detail:
+        `Pembayaran diterima saat order berstatus ${params.previousOrder}. ` +
+        "Periksa lalu proses ulang atau refund.",
+    });
+
+    return;
+  }
+
+  const fulfillable =
+    params.incoming === "PAID" &&
+    params.nextOrder !== "MANUAL_REVIEW" &&
+    !DEAD_STATUSES.includes(params.nextOrder);
+
+  if (!fulfillable) return;
+
+  if (discordClient) {
     try {
-      const notification =
-        req.body as MidtransNotification;
-
-      console.log(
-        "========================================",
-      );
-
-      console.log(
-        "Midtrans Notification Received",
-      );
-
-      console.log(
-        notification,
-      );
-
-      console.log(
-        "========================================",
-      );
-
-      // ==========================================
-      // VERIFY SIGNATURE
-      // ==========================================
-
-      const signatureValid =
-        verifySignature(notification);
-
-      if (!signatureValid) {
-        console.error(
-          "❌ Invalid Midtrans signature.",
-        );
-
-        return res.status(401).json({
-          success: false,
-          message: "Invalid signature",
-        });
-      }
-
-      console.log(
-        "✅ Midtrans signature valid.",
-      );
-
-      // ==========================================
-      // VALIDATE ORDER ID
-      // ==========================================
-
-      if (!notification.order_id) {
-        return res.status(400).json({
-          success: false,
-          message: "Missing order_id",
-        });
-      }
-
-      // ==========================================
-      // VALIDATE GROSS AMOUNT
-      // ==========================================
-
-      if (!notification.gross_amount) {
-        return res.status(400).json({
-          success: false,
-          message: "Missing gross_amount",
-        });
-      }
-
-      // ==========================================
-      // FIND PAYMENT
-      // ==========================================
-
-      const payment =
-        await prisma.payment.findUnique({
-          where: {
-            midtransOrderId:
-              notification.order_id,
-          },
-
-          include: {
-            order: true,
-          },
-        });
-
-      if (!payment) {
-        console.error(
-          `❌ Payment tidak ditemukan: ${notification.order_id}`,
-        );
-
-        return res.status(404).json({
-          success: false,
-          message: "Payment not found",
-        });
-      }
-
-      // ==========================================
-      // CHECK AMOUNT
-      // ==========================================
-
-      const notificationAmount =
-        Number(
-          notification.gross_amount,
-        );
-
-      if (
-        !Number.isFinite(
-          notificationAmount,
-        ) ||
-        notificationAmount !==
-          payment.grossAmount
-      ) {
-        console.error(
-          "❌ Gross amount tidak cocok.",
-        );
-
-        console.error({
-          expected:
-            payment.grossAmount,
-
-          received:
-            notification.gross_amount,
-        });
-
-        return res.status(400).json({
-          success: false,
-          message:
-            "Gross amount mismatch",
-        });
-      }
-
-      // ==========================================
-      // DETERMINE PAYMENT STATUS
-      // ==========================================
-
-      const transactionStatus =
-        notification.transaction_status;
-
-      let paymentStatus:
-        | "PENDING"
-        | "PAID"
-        | "EXPIRED"
-        | "FAILED"
-        | "REFUNDED" =
-        "PENDING";
-
-      let requestedOrderStatus:
-        | "PAYMENT_PENDING"
-        | "PAID"
-        | "PAYMENT_TIMEOUT"
-        | "PAYMENT_FAILED" =
-        "PAYMENT_PENDING";
-
-      // ==========================================
-      // SUCCESS
-      // ==========================================
-
-      if (
-        transactionStatus ===
-        "settlement"
-      ) {
-        paymentStatus = "PAID";
-        requestedOrderStatus = "PAID";
-      }
-
-      // ==========================================
-      // QRIS / PAYMENT PENDING
-      // ==========================================
-
-      else if (
-        transactionStatus ===
-        "pending"
-      ) {
-        paymentStatus = "PENDING";
-        requestedOrderStatus =
-          "PAYMENT_PENDING";
-      }
-
-      // ==========================================
-      // EXPIRED
-      // ==========================================
-
-      else if (
-        transactionStatus ===
-        "expire"
-      ) {
-        paymentStatus = "EXPIRED";
-        requestedOrderStatus =
-          "PAYMENT_TIMEOUT";
-      }
-
-      // ==========================================
-      // FAILED
-      // ==========================================
-
-      else if (
-        transactionStatus ===
-          "deny" ||
-        transactionStatus ===
-          "cancel" ||
-        transactionStatus ===
-          "failure"
-      ) {
-        paymentStatus = "FAILED";
-        requestedOrderStatus =
-          "PAYMENT_FAILED";
-      }
-
-      // ==========================================
-      // REFUND
-      // ==========================================
-
-      else if (
-        transactionStatus ===
-          "refund" ||
-        transactionStatus ===
-          "partial_refund"
-      ) {
-        paymentStatus = "REFUNDED";
-      }
-
-      // ==========================================
-      // UNKNOWN STATUS
-      // ==========================================
-
-      else {
-        console.log(
-          `ℹ️ Status Midtrans belum ditangani: ${transactionStatus}`,
-        );
-
-        return res.status(200).json({
-          success: true,
-          message:
-            "Notification received",
-        });
-      }
-
-      // ==========================================
-      // RESOLVE ORDER STATUS
-      // ==========================================
-
-      const resolvedOrderStatus =
-        resolveOrderStatus(
-          payment.order.status as OrderStatus,
-          paymentStatus,
-          requestedOrderStatus,
-        );
-
-      console.log(
-        "Webhook status resolution:",
-      );
-
-      console.log({
-        currentOrderStatus:
-          payment.order.status,
-
-        requestedOrderStatus,
-
-        resolvedOrderStatus,
-
-        currentPaymentStatus:
-          payment.status,
-
-        incomingPaymentStatus:
-          paymentStatus,
-      });
-
-      // ==========================================
-      // IDEMPOTENCY
-      // ==========================================
-      //
-      // Payment dan Order sekarang dicek terpisah.
-      //
-      // Contoh:
-      //
-      // Payment PAID
-      // Order COMPLETED
-      //
-      // webhook settlement datang lagi.
-      //
-      // Payment tetap PAID.
-      // Order tetap COMPLETED.
-      //
-      // Tidak perlu dianggap sebagai perubahan state.
-      // ==========================================
-
-      const paymentAlreadyProcessed =
-        payment.status ===
-        paymentStatus;
-
-      const orderAlreadyCorrect =
-        payment.order.status ===
-        resolvedOrderStatus;
-
-      if (
-        paymentAlreadyProcessed &&
-        orderAlreadyCorrect
-      ) {
-        console.log(
-          "ℹ️ Notification sudah pernah diproses.",
-        );
-
-        return res.status(200).json({
-          success: true,
-          message:
-            "Already processed",
-        });
-      }
-
-      // ==========================================
-      // DATABASE TRANSACTION
-      // ==========================================
-
-      let finalOrderStatus:
-        | OrderStatus
-        | undefined;
-
-      await prisma.$transaction(
-        async (tx) => {
-          // ======================================
-          // RE-FETCH ORDER + PAYMENT
-          // ======================================
-          //
-          // Penting untuk mengurangi kemungkinan
-          // memakai state lama ketika ada webhook
-          // atau worker lain yang berjalan bersamaan.
-          // ======================================
-
-          const currentPayment =
-            await tx.payment.findUnique({
-              where: {
-                id: payment.id,
-              },
-
-              include: {
-                order: true,
-              },
-            });
-
-          if (!currentPayment) {
-            throw new Error(
-              `Payment ${payment.id} tidak ditemukan saat transaction.`,
-            );
-          }
-
-          const currentOrderStatus =
-            currentPayment.order
-              .status as OrderStatus;
-
-          // ======================================
-          // RESOLVE ULANG BERDASARKAN STATE TERKINI
-          // ======================================
-
-          const transactionOrderStatus =
-            resolveOrderStatus(
-              currentOrderStatus,
-              paymentStatus,
-              requestedOrderStatus,
-            );
-
-          const oldPaymentStatus =
-            currentPayment.status;
-
-          const oldOrderStatus =
-            currentOrderStatus;
-
-          // ======================================
-          // UPDATE PAYMENT
-          // ======================================
-
-          const paymentUpdateData: {
-            status:
-              | "PENDING"
-              | "PAID"
-              | "EXPIRED"
-              | "FAILED"
-              | "REFUNDED";
-
-            transactionId?: string;
-            paymentMethod?: string;
-            signatureValid: boolean;
-            rawNotification: Prisma.InputJsonValue;
-            paidAt?: Date;
-          } = {
-            status:
-              paymentStatus,
-
-            signatureValid:
-              true,
-
-            rawNotification:
-              JSON.parse(
-                JSON.stringify(
-                  notification,
-                ),
-              ),
-          };
-
-          if (
-            notification.transaction_id
-          ) {
-            paymentUpdateData.transactionId =
-              notification.transaction_id;
-          }
-
-          if (
-            notification.payment_type
-          ) {
-            paymentUpdateData.paymentMethod =
-              notification.payment_type;
-          }
-
-          if (
-            paymentStatus === "PAID" &&
-            !currentPayment.paidAt
-          ) {
-            paymentUpdateData.paidAt =
-              new Date();
-          }
-
-          await tx.payment.update({
-            where: {
-              id: currentPayment.id,
-            },
-
-            data:
-              paymentUpdateData,
-          });
-
-          // ======================================
-          // UPDATE ORDER
-          // ======================================
-          //
-          // Hanya update status jika memang berbeda.
-          //
-          // Yang paling penting:
-          //
-          // PROCESSING → settlement
-          // tetap PROCESSING
-          //
-          // VERIFYING → settlement
-          // tetap VERIFYING
-          //
-          // COMPLETED → settlement
-          // tetap COMPLETED
-          // ======================================
-
-          const orderUpdateData: {
-            status: OrderStatus;
-            paidAt?: Date;
-          } = {
-            status:
-              transactionOrderStatus,
-          };
-
-          if (
-            paymentStatus === "PAID" &&
-            !currentPayment.order.paidAt
-          ) {
-            orderUpdateData.paidAt =
-              new Date();
-          }
-
-          const shouldUpdateOrder =
-            currentOrderStatus !==
-              transactionOrderStatus ||
-            (
-              paymentStatus === "PAID" &&
-              !currentPayment.order.paidAt
-            );
-
-          if (shouldUpdateOrder) {
-            await tx.order.update({
-              where: {
-                id:
-                  currentPayment.order.id,
-              },
-
-              data:
-                orderUpdateData,
-            });
-          }
-
-          // ======================================
-          // ORDER EVENT
-          // ======================================
-          //
-          // Buat event jika payment state berubah
-          // atau order state berubah.
-          // ======================================
-
-          const paymentChanged =
-            oldPaymentStatus !==
-            paymentStatus;
-
-          const orderChanged =
-            oldOrderStatus !==
-            transactionOrderStatus;
-
-          if (
-            paymentChanged ||
-            orderChanged
-          ) {
-            await tx.orderEvent.create({
-              data: {
-                orderId:
-                  currentPayment.order.id,
-
-                eventType:
-                  `PAYMENT_${paymentStatus}`,
-
-                oldStatus:
-                  oldOrderStatus,
-
-                newStatus:
-                  transactionOrderStatus,
-
-                description:
-                  `Midtrans notification: ${transactionStatus}`,
-
-                metadata:
-                  JSON.parse(
-                    JSON.stringify({
-                      ...notification,
-
-                      paymentChanged,
-
-                      orderChanged,
-
-                      currentPaymentStatus:
-                        oldPaymentStatus,
-
-                      incomingPaymentStatus:
-                        paymentStatus,
-
-                      currentOrderStatus:
-                        oldOrderStatus,
-
-                      requestedOrderStatus,
-
-                      resolvedOrderStatus:
-                        transactionOrderStatus,
-                    }),
-                  ),
-              },
-            });
-          }
-
-          // ======================================
-          // LOG
-          // ======================================
-
-          console.log({
-            oldPaymentStatus,
-            newPaymentStatus:
-              paymentStatus,
-
-            oldOrderStatus,
-            newOrderStatus:
-              transactionOrderStatus,
-
-            paymentChanged,
-            orderChanged,
-          });
-
-          finalOrderStatus =
-            transactionOrderStatus;
-        },
-      );
-
-      console.log(
-        "✅ Payment berhasil diperbarui.",
-      );
-
-      // ==========================================
-      // UPDATE DISCORD TICKET
-      // ==========================================
-
-      if (
-        paymentStatus === "PAID" &&
-        discordClient
-      ) {
-        try {
-          await updateTicketPaymentSuccess({
-            client:
-              discordClient,
-
-            orderId:
-              payment.orderId,
-          });
-        } catch (error) {
-          console.error(
-            "❌ Gagal update ticket Discord:",
-            error,
-          );
-        }
-      }
-
-      // ==========================================
-      // AUTO FULFILLMENT
-      // ==========================================
-      //
-      // Tetap jalankan fulfillment untuk PAID.
-      //
-      // Kalau Order sudah:
-      //
-      // PROCESSING
-      // VERIFYING
-      // COMPLETED
-      //
-      // fulfillPaidOrder() akan melakukan
-      // reconciliation berdasarkan transfer yang ada.
-      //
-      // Yang penting webhook tidak lagi
-      // mengubah status order menjadi PAID.
-      // ==========================================
-
-      if (
-        paymentStatus === "PAID"
-      ) {
-        try {
-          console.log(
-            `🚀 Memulai fulfillment order ${payment.orderId}...`,
-          );
-
-          const result =
-            await fulfillPaidOrder(
-              payment.orderId,
-            );
-
-          console.log(
-            `✅ Fulfillment order ${payment.orderId} selesai.`,
-          );
-
-          console.log(
-            "Fulfillment result:",
-            result,
-          );
-        } catch (error) {
-          console.error(
-            `❌ Fulfillment order ${payment.orderId} gagal:`,
-            error,
-          );
-        }
-      }
-
-      // ==========================================
-      // RESPONSE MIDTRANS
-      // ==========================================
-
-      return res.status(200).json({
-        success: true,
-
-        orderStatus:
-          finalOrderStatus,
-
-        paymentStatus,
+      await updateTicketPaymentSuccess({
+        client: discordClient,
+        orderId: params.orderId,
       });
     } catch (error) {
       console.error(
-        "❌ Midtrans Webhook Error:",
-        error,
+        "❌ Gagal update ticket Discord:",
+        error instanceof Error ? error.message : error,
       );
+    }
+  }
 
-      return res.status(500).json({
-        success: false,
-        message:
-          "Internal server error",
+  try {
+    console.log(`🚀 Memulai fulfillment order ${params.orderId}...`);
+
+    const result = await fulfillPaidOrder(params.orderId);
+
+    console.log(`✅ Fulfillment order ${params.orderId} selesai.`, result);
+  } catch (error) {
+    console.error(
+      `❌ Fulfillment order ${params.orderId} gagal:`,
+      error instanceof Error ? error.message : error,
+    );
+  }
+}
+
+// ======================================================
+// PEMROSESAN NOTIFIKASI
+// ======================================================
+// Dipakai oleh webhook dan worker rekonsiliasi.
+
+export interface NotificationResult {
+  httpStatus: number;
+  body: Record<string, unknown>;
+  postWork?: () => Promise<void>;
+}
+
+export async function processMidtransNotification(
+  notification: MidtransNotification | undefined,
+  source: "WEBHOOK" | "RECONCILE" = "WEBHOOK",
+): Promise<NotificationResult> {
+  if (!notification || typeof notification !== "object") {
+    return {
+      httpStatus: 400,
+      body: { success: false, message: "Invalid body" },
+    };
+  }
+
+  if (source === "WEBHOOK") {
+    // Jangan cetak seluruh notifikasi (termasuk signature_key).
+    console.log("Midtrans notification:", {
+      order_id: notification.order_id,
+      transaction_status: notification.transaction_status,
+      status_code: notification.status_code,
+      gross_amount: notification.gross_amount,
+    });
+  }
+
+  if (!verifySignature(notification)) {
+    console.error(`❌ Invalid Midtrans signature (${notification.order_id}).`);
+
+    return {
+      httpStatus: 401,
+      body: { success: false, message: "Invalid signature" },
+    };
+  }
+
+  const midtransOrderId = notification.order_id as string;
+
+  const payment = await prisma.payment.findUnique({
+    where: { midtransOrderId },
+  });
+
+  if (!payment) {
+    console.error(`❌ Payment tidak ditemukan: ${midtransOrderId}`);
+
+    return {
+      httpStatus: 404,
+      body: { success: false, message: "Payment not found" },
+    };
+  }
+
+  const amount = Number(notification.gross_amount);
+
+  if (!Number.isFinite(amount) || amount !== payment.grossAmount) {
+    console.error("❌ Gross amount tidak cocok.", {
+      expected: payment.grossAmount,
+      received: notification.gross_amount,
+    });
+
+    return {
+      httpStatus: 400,
+      body: { success: false, message: "Gross amount mismatch" },
+    };
+  }
+
+  const incoming = mapTransactionStatus(notification.transaction_status);
+
+  if (!incoming) {
+    console.log(
+      `ℹ️ Status Midtrans belum ditangani: ${notification.transaction_status}`,
+    );
+
+    return {
+      httpStatus: 200,
+      body: { success: true, message: "Notification received" },
+    };
+  }
+
+  const outcome = await prisma.$transaction(async (tx) => {
+    // Kunci order dulu: notifikasi yang datang bersamaan
+    // diproses berurutan dan melihat keadaan terbaru.
+    await tx.$queryRaw`
+      SELECT id FROM "Order" WHERE id = ${payment.orderId} FOR UPDATE
+    `;
+
+    const current = await tx.payment.findUniqueOrThrow({
+      where: { id: payment.id },
+      include: { order: true },
+    });
+
+    const previousPayment = current.status as PaymentStatusValue;
+    const previousOrder = current.order.status as OrderStatus;
+
+    const effectivePayment = resolvePaymentStatus(previousPayment, incoming);
+    const nextOrder = resolveOrderStatus(
+      previousOrder,
+      effectivePayment,
+      previousPayment,
+    );
+
+    const paymentChanged = previousPayment !== effectivePayment;
+    const orderChanged = previousOrder !== nextOrder;
+    const needsPaymentPaidAt = effectivePayment === "PAID" && !current.paidAt;
+    const needsOrderPaidAt =
+      effectivePayment === "PAID" && !current.order.paidAt;
+
+    const latePayment =
+      effectivePayment === "PAID" &&
+      paymentChanged &&
+      nextOrder === "MANUAL_REVIEW" &&
+      previousOrder !== "MANUAL_REVIEW";
+
+    if (
+      !paymentChanged &&
+      !orderChanged &&
+      !needsPaymentPaidAt &&
+      !needsOrderPaidAt
+    ) {
+      return {
+        changed: false,
+        effectivePayment,
+        nextOrder,
+        previousOrder,
+        latePayment: false,
+      };
+    }
+
+    const paymentData: Prisma.PaymentUpdateInput = {
+      status: effectivePayment,
+      signatureValid: true,
+      rawNotification: JSON.parse(JSON.stringify(notification)),
+    };
+
+    if (notification.transaction_id) {
+      paymentData.transactionId = notification.transaction_id;
+    }
+
+    if (notification.payment_type) {
+      paymentData.paymentMethod = notification.payment_type;
+    }
+
+    if (needsPaymentPaidAt) {
+      paymentData.paidAt = new Date();
+    }
+
+    await tx.payment.update({
+      where: { id: current.id },
+      data: paymentData,
+    });
+
+    if (orderChanged || needsOrderPaidAt) {
+      await tx.order.update({
+        where: { id: current.orderId },
+        data: {
+          status: nextOrder,
+          ...(needsOrderPaidAt ? { paidAt: new Date() } : {}),
+        },
       });
     }
-  },
-);
+
+    if (paymentChanged || orderChanged) {
+      await tx.orderEvent.create({
+        data: {
+          orderId: current.orderId,
+          eventType: latePayment
+            ? "LATE_PAYMENT"
+            : `PAYMENT_${effectivePayment}`,
+          oldStatus: previousOrder,
+          newStatus: nextOrder,
+          description: latePayment
+            ? `Pembayaran diterima setelah order berstatus ${previousOrder}. Butuh pemeriksaan admin.`
+            : `Midtrans ${source === "RECONCILE" ? "status check" : "notification"}: ${notification.transaction_status}`,
+          metadata: {
+            source,
+            transactionStatus: notification.transaction_status ?? null,
+            transactionId: notification.transaction_id ?? null,
+            statusCode: notification.status_code ?? null,
+            previousPaymentStatus: previousPayment,
+            incomingPaymentStatus: incoming,
+            effectivePaymentStatus: effectivePayment,
+            previousOrderStatus: previousOrder,
+            resolvedOrderStatus: nextOrder,
+          },
+        },
+      });
+    }
+
+    return {
+      changed: true,
+      effectivePayment,
+      nextOrder,
+      previousOrder,
+      latePayment,
+    };
+  });
+
+  return {
+    httpStatus: 200,
+    body: {
+      success: true,
+      message: outcome.changed ? "OK" : "Already processed",
+      orderStatus: outcome.nextOrder,
+      paymentStatus: outcome.effectivePayment,
+    },
+    postWork: () =>
+      runPostWork({
+        orderId: payment.orderId,
+        incoming,
+        nextOrder: outcome.nextOrder,
+        previousOrder: outcome.previousOrder,
+        latePayment: outcome.latePayment,
+      }),
+  };
+}
+
+// ======================================================
+// ROUTE
+// ======================================================
+
+router.post("/midtrans", async (req: Request, res: Response) => {
+  try {
+    const result = await processMidtransNotification(
+      req.body as MidtransNotification | undefined,
+    );
+
+    // Balas Midtrans SEKARANG, sebelum pekerjaan yang lebih lambat.
+    res.status(result.httpStatus).json(result.body);
+
+    if (result.postWork) {
+      await result.postWork();
+    }
+  } catch (error) {
+    console.error(
+      "❌ Midtrans Webhook Error:",
+      error instanceof Error ? error.message : error,
+    );
+
+    if (!res.headersSent) {
+      res
+        .status(500)
+        .json({ success: false, message: "Internal server error" });
+    }
+  }
+});
 
 export default router;

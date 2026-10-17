@@ -7,6 +7,7 @@ import {
 import { data as orderCommand } from "./commands/order.js";
 import { data as visendRateCommand } from "./commands/visendRate.js";
 import { data as adminReviewCommand } from "./commands/adminReview.js";
+import { data as senderCommand } from "./commands/sender.js";
 
 const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.CLIENT_ID;
@@ -28,6 +29,7 @@ const commands = [
   orderCommand.toJSON(),
   visendRateCommand.toJSON(),
   adminReviewCommand.toJSON(),
+  senderCommand.toJSON(),
 ];
 
 const rest = new REST({ version: "10" }).setToken(token);

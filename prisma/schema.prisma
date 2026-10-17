@@ -89,8 +89,22 @@ model SenderAccount {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
   transfers      Transfer[]
+  auditLogs      SenderAuditLog[]
 
   @@index([status])
+}
+
+model SenderAuditLog {
+  id              Int           @id @default(autoincrement())
+  senderAccountId Int
+  adminDiscordId  String
+  action          String
+  details         Json?
+  createdAt       DateTime      @default(now())
+  senderAccount   SenderAccount @relation(fields: [senderAccountId], references: [id])
+
+  @@index([senderAccountId])
+  @@index([createdAt])
 }
 
 model Transfer {

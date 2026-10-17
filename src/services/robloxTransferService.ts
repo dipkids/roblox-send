@@ -70,6 +70,9 @@ export async function executeMockTransfer(
       options.failureMessage ??
       "Simulasi transfer gagal.";
 
+    const errorCode =
+      process.env.MOCK_TRANSFER_FAIL_CODE ?? "MOCK_TRANSFER_FAILED";
+
     console.log(
       "❌ MOCK TRANSFER GAGAL.",
     );
@@ -89,8 +92,7 @@ export async function executeMockTransfer(
               },
               data: {
                 status: "FAILED",
-                errorCode:
-                  "MOCK_TRANSFER_FAILED",
+                errorCode,
                 errorMessage:
                   failureMessage,
               },
@@ -133,8 +135,7 @@ export async function executeMockTransfer(
                 robuxAmount:
                   transfer.robuxAmount,
 
-                errorCode:
-                  "MOCK_TRANSFER_FAILED",
+                errorCode,
 
                 errorMessage:
                   failureMessage,
@@ -145,8 +146,8 @@ export async function executeMockTransfer(
           return updatedTransfer;
         },
         {
-          maxWait: 10000,
-          timeout: 10000,
+          maxWait: 30000,
+          timeout: 30000,
         },
       );
 
@@ -215,8 +216,8 @@ export async function executeMockTransfer(
       return updatedTransfer;
     },
     {
-      maxWait: 10000,
-      timeout: 10000,
+      maxWait: 30000,
+      timeout: 30000,
     },
   );
 

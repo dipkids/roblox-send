@@ -76,8 +76,8 @@ export async function verifyTransfer(
       return updatedOrder;
     },
     {
-      maxWait: 10000,
-      timeout: 10000,
+      maxWait: 30000,
+      timeout: 30000,
     },
   );
 

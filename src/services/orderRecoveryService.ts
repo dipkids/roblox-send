@@ -85,3 +85,31 @@ export async function recoverPendingOrders() {
   console.log("ORDER RECOVERY SELESAI");
   console.log("========================================");
 }
+
+export async function recoverStaleOrders(staleMinutes = 2) {
+  const cutoff = new Date(Date.now() - staleMinutes * 60_000);
+
+  const orders = await prisma.order.findMany({
+    where: {
+      status: { in: [...RECOVERABLE_STATUSES] },
+      updatedAt: { lt: cutoff },
+    },
+    orderBy: { updatedAt: "asc" },
+    take: 5,
+  });
+
+  for (const order of orders) {
+    console.log(
+      `🔁 Order ${order.orderNumber} macet di ${order.status}. Mencoba recovery...`,
+    );
+
+    try {
+      await fulfillPaidOrder(order.id);
+    } catch (error) {
+      console.error(
+        `❌ Recovery macet gagal untuk ${order.orderNumber}:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+}

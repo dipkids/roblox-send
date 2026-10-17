@@ -5,6 +5,7 @@ export async function reserveSenderForOrder(
 ) {
   return prisma.$transaction(
     async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
       // ==========================================
       // AMBIL ORDER
       // ==========================================
@@ -405,8 +406,8 @@ export async function reserveSenderForOrder(
       };
     },
     {
-      maxWait: 10000,
-      timeout: 10000,
+      maxWait: 60000,
+      timeout: 60000,
     },
   );
 }
@@ -415,7 +416,7 @@ export async function reserveSenderForOrder(
 // NEXT DAILY RESET
 // ==========================================
 
-function getNextDailyReset(
+export function getNextDailyReset(
   now: Date,
 ): Date {
   const next = new Date(now);
@@ -438,7 +439,7 @@ function getNextDailyReset(
 // NEXT MONTHLY RESET
 // ==========================================
 
-function getNextMonthlyReset(
+export function getNextMonthlyReset(
   now: Date,
 ): Date {
   const next = new Date(

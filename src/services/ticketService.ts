@@ -5,6 +5,7 @@ import {
   ChannelType,
   Client,
   EmbedBuilder,
+  OverwriteType,
   PermissionFlagsBits,
   TextChannel,
 } from "discord.js";
@@ -29,6 +30,8 @@ export async function createOrderTicket(params: {
 
   const botMember = guild.members.me;
 
+  const adminRoleId = process.env.ADMIN_ROLE_ID;
+
   if (!botMember) {
     throw new Error(
       "Bot member tidak ditemukan di server.",
@@ -47,15 +50,13 @@ export async function createOrderTicket(params: {
     permissionOverwrites: [
       {
         id: guild.roles.everyone.id,
-
-        deny: [
-          PermissionFlagsBits.ViewChannel,
-        ],
+        type: OverwriteType.Role,
+        deny: [PermissionFlagsBits.ViewChannel],
       },
 
       {
         id: params.discordUserId,
-
+        type: OverwriteType.Member,
         allow: [
           PermissionFlagsBits.ViewChannel,
           PermissionFlagsBits.SendMessages,
@@ -65,15 +66,28 @@ export async function createOrderTicket(params: {
 
       {
         id: botMember.id,
-
+        type: OverwriteType.Member,
         allow: [
           PermissionFlagsBits.ViewChannel,
           PermissionFlagsBits.SendMessages,
           PermissionFlagsBits.ReadMessageHistory,
           PermissionFlagsBits.ManageChannels,
-          PermissionFlagsBits.ManageMessages,
         ],
       },
+
+      ...(adminRoleId
+        ? [
+            {
+              id: adminRoleId,
+              type: OverwriteType.Role,
+              allow: [
+                PermissionFlagsBits.ViewChannel,
+                PermissionFlagsBits.SendMessages,
+                PermissionFlagsBits.ReadMessageHistory,
+              ],
+            },
+          ]
+        : []),
     ],
   });
 

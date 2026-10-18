@@ -3,6 +3,7 @@ import { notifyAdminOrder } from "./adminNotificationService.js";
 import { getMidtransConfig } from "./paymentService.js";
 import { recoverStaleOrders } from "./orderRecoveryService.js";
 import { processMidtransNotification } from "../web/midtransWebhook.js";
+import { notifyCustomerEscalated } from "./transferFailureService.js";
 
 type StatusBody = NonNullable<
   Parameters<typeof processMidtransNotification>[0]
@@ -165,7 +166,62 @@ export async function escalateStaleCustomerWaits() {
         kind: "MANUAL_REVIEW",
         detail: `Customer tidak merespons selama ${CUSTOMER_WAIT_HOURS} jam setelah pengiriman gagal.`,
       });
+      await notifyCustomerEscalated(id);
     }
+  }
+}
+
+// ======================================================
+// ORDER YATIM (gagal sebelum QRIS terbuat)
+// ======================================================
+
+export async function cancelAbandonedOrders() {
+  const cutoff = new Date(Date.now() - 30 * 60_000);
+
+  const orders = await prisma.order.findMany({
+    where: {
+      status: { in: ["CREATED", "WAITING_PROFILE_CONFIRMATION", "WAITING_PAYMENT"] },
+      payment: { is: null },
+      createdAt: { lt: cutoff },
+    },
+    select: { id: true },
+    take: 20,
+  });
+
+  for (const { id } of orders) {
+    await prisma.$transaction(
+      async (tx) => {
+        const rows = await tx.$queryRaw<Array<{ id: number; status: string }>>`
+          SELECT id, status FROM "Order" WHERE id = ${id} FOR UPDATE
+        `;
+
+        if (
+          rows.length === 0 ||
+          !["CREATED", "WAITING_PROFILE_CONFIRMATION", "WAITING_PAYMENT"].includes(
+            rows[0].status,
+          )
+        ) {
+          return;
+        }
+
+        await tx.order.update({
+          where: { id },
+          data: { status: "CANCELLED", cancelledAt: new Date() },
+        });
+
+        await tx.orderEvent.create({
+          data: {
+            orderId: id,
+            eventType: "ORDER_ABANDONED",
+            oldStatus: rows[0].status,
+            newStatus: "CANCELLED",
+            description:
+              "Order tidak pernah mendapat pembayaran (QRIS gagal dibuat) dan dibatalkan otomatis.",
+          },
+        });
+      },
+      { maxWait: 30000, timeout: 30000 },
+    );
   }
 }
 
@@ -196,6 +252,7 @@ export async function runBackgroundWorkers() {
     await runStep("recoverStaleOrders", () => recoverStaleOrders());
     await runStep("reconcilePayments", reconcilePayments);
     await runStep("escalateStaleCustomerWaits", escalateStaleCustomerWaits);
+    await runStep("cancelAbandonedOrders", cancelAbandonedOrders);
   } finally {
     running = false;
   }

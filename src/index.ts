@@ -27,7 +27,7 @@ import { findRobloxUser } from "./services/robloxService.js";
 import { showRobloxConfirmation } from "./buttons/robloxConfirm.js";
 
 import { getRobuxRate } from "./services/rateService.js";
-import { createOrder } from "./services/orderService.js";
+import { OrderValidationError, createOrder, isValidRobuxAmount, } from "./services/orderService.js";
 import { createOrderTicket, sendOrderTicketMessage } from "./services/ticketService.js";
 import { createDynamicQris } from "./services/paymentService.js";
 import { checkSenderForOrder } from "./services/senderService.js";
@@ -68,8 +68,7 @@ if (!token) {
 
 const client = new Client({
   intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.Guilds
   ],
 });
 
@@ -206,10 +205,15 @@ async function handleInteraction(interaction: Interaction) {
     // /visend_rate
     // ==============================
 
-    if (
-      interaction.commandName ===
-      visendRateCommand.data.name
-    ) {
+    if (interaction.commandName === visendRateCommand.data.name) {
+      if (!(await hasAdminRole(interaction))) {
+        await interaction.reply({
+          content: "⛔ Kamu tidak memiliki akses admin.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
       await visendRateCommand.execute(interaction);
       return;
     }
@@ -641,6 +645,15 @@ async function handleInteraction(interaction: Interaction) {
           "",
         ),
       );
+
+      if (!isValidRobuxAmount(amount)) {
+        await interaction.reply({
+          content: "❌ Jumlah Robux tidak valid.",
+          flags: MessageFlags.Ephemeral,
+        });
+
+        return;
+      }
 
       await showRobloxProfileModal(
         interaction,
@@ -1422,9 +1435,9 @@ async function handleInteraction(interaction: Interaction) {
 
 client.on("interactionCreate", (interaction) => {
   handleInteraction(interaction).catch((error) => {
-    if (error?.code === 10062) {
+    if ([10062, 10008, 10003].includes(error?.code)) {
       console.warn(
-        "⚠️ Interaksi kedaluwarsa sebelum sempat dibalas (10062).",
+        `⚠️ Interaksi tidak bisa dibalas (kode ${error.code}): kedaluwarsa, pesan, atau channel sudah dihapus.`,
       );
       return;
     }

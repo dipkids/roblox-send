@@ -1,7 +1,6 @@
 import {
   ChatInputCommandInteraction,
   MessageFlags,
-  PermissionFlagsBits,
   SlashCommandBuilder,
 } from "discord.js";
 
@@ -18,31 +17,14 @@ export const data = new SlashCommandBuilder()
       .setName("rate")
       .setDescription("Rate harga per 1 Robux")
       .setRequired(false)
-      .setMinValue(1),
-  )
-  .setDefaultMemberPermissions(
-    PermissionFlagsBits.Administrator.toString(),
+      .setMinValue(1)
+      .setMaxValue(1000),
   );
 
 export async function execute(
   interaction: ChatInputCommandInteraction,
 ) {
-  // ==============================
-  // CEK ADMIN
-  // ==============================
-  if (
-    !interaction.memberPermissions?.has(
-      PermissionFlagsBits.Administrator,
-    )
-  ) {
-    await interaction.reply({
-      content:
-        "❌ Kamu tidak memiliki izin untuk mengubah rate.",
-      flags: MessageFlags.Ephemeral,
-    });
-
-    return;
-  }
+  // Pengecekan role admin dilakukan di index.ts sebelum fungsi ini dipanggil.
 
   // ==============================
   // DEFER RESPONSE
@@ -78,6 +60,8 @@ export async function execute(
     // UPDATE RATE
     // ==============================
     const newRate = await setRobuxRate(rate);
+
+    console.log(`💰 Rate diubah oleh ${interaction.user.id}: Rp${newRate}/Robux`);
 
     await interaction.editReply({
       content:

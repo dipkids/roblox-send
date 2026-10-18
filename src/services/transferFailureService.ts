@@ -486,3 +486,19 @@ export async function customerCancelOrder(
     detail: `Tujuan refund: ${destination}\nAlasan: ${reason || "-"}`,
   });
 }
+
+export async function notifyCustomerEscalated(orderId: number) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: { user: true },
+  });
+
+  if (!order) return;
+
+  await sendToTicket(orderId, {
+    content:
+      `<@${order.user.discordUserId}> ⏰ Order kamu diteruskan ke admin karena belum ada tindakan. ` +
+      "Admin akan memeriksa dan menghubungi kamu di sini.",
+    mentionUserId: order.user.discordUserId,
+  });
+}

@@ -318,7 +318,7 @@ export async function updateTicketPaymentSuccess(params: {
             value:
               "🟢 **Pembayaran Berhasil**\n\n" +
               "Pembayaran telah dikonfirmasi oleh Midtrans.\n" +
-              "Order sedang diproses automasi pengiriman...",
+              "Orderan kamu sedang diproses...",
           };
         }
         return field;
@@ -381,7 +381,7 @@ export async function sendTicketProcessingEmbed(params: {
         `✅ Penerima dikonfirmasi: **@${order.robloxProfile.username}**\n` +
           `✅ Pembayaran terverifikasi\n` +
           `🔄 Akun pengirim terpilih: **${senderLabel}**\n` +
-          `⏳ Sedang mengirim **${order.robuxAmount.toLocaleString("id-ID")} Robux** via Roblox+...`,
+          `⏳ Sedang mengirim **${order.robuxAmount.toLocaleString("id-ID")} Robux**...`,
       )
       .setFooter({ text: "Mohon tunggu sebentar, sistem sedang mengeksekusi transfer..." })
       .setTimestamp();
@@ -440,11 +440,12 @@ export async function sendOrderCompletedFlow(params: {
 
   const senderName = senderAccount?.accountName ?? "dantetempe";
 
-  // Ambil referensi resmi (format RXT-...)
-  const refId =
+  // Ambil referensi resmi (format RXT-...) tanpa query params seperti ?_RoValraRequest=
+  const rawRef =
     latestTransfer?.externalTransferId && latestTransfer.externalTransferId.startsWith("RXT-")
       ? latestTransfer.externalTransferId
       : `RXT-${Math.floor(1000000000000000000 + Math.random() * 9000000000000000000)}`;
+  const refId = rawRef.split("?")[0].split("#")[0].trim();
 
   // Ambil user ID Roblox sender secara akurat
   let senderRobloxId = senderAccount?.robloxUserId;
@@ -647,14 +648,64 @@ export async function sendOrderCompletedFlow(params: {
     try {
       const channel = await params.client.channels.fetch(order.ticket.channelId);
       if (channel && channel.isTextBased()) {
-        await sendChannelWithRetry(() =>
-          (channel as TextChannel).send({
-            content: `<@${order.user.discordUserId}> Pesananmu telah selesai dikirim!`,
-            embeds: [sentEmbed, completedEmbed],
-            files: attachment ? [attachment] : [],
-            components: [starRow, actionRow],
-          }),
-        );
+        const textChannel = channel as TextChannel;
+
+        // Cek apakah pesan processing (Pengiriman Robux Sedang Diproses) ada di channel
+        let editedExistingMessage = false;
+        try {
+          const recentMessages = await textChannel.messages.fetch({ limit: 10 });
+          const processingMsg = recentMessages.find(
+            (m) =>
+              m.author.id === params.client.user?.id &&
+              m.embeds.some(
+                (e) =>
+                  e.title?.includes("Pengiriman Robux Sedang Diproses") ||
+                  e.title?.includes("Pembayaran berhasil!"),
+              ),
+          );
+
+          if (processingMsg) {
+            // Ambil embed pembayaran dari pesan sebelumnya agar tetap utuh
+            const paymentEmbed = processingMsg.embeds.find((e) =>
+              e.title?.includes("Pembayaran berhasil!"),
+            );
+
+            const embedsToUpdate = paymentEmbed
+              ? [EmbedBuilder.from(paymentEmbed), sentEmbed]
+              : [sentEmbed];
+
+            await sendChannelWithRetry(() =>
+              processingMsg.edit({
+                embeds: embedsToUpdate,
+                files: attachment ? [attachment] : [],
+              }),
+            );
+            editedExistingMessage = true;
+          }
+        } catch (fetchErr) {
+          console.warn("⚠️ Gagal mengedit pesan processing sebelumnya:", fetchErr);
+        }
+
+        // Kirim pesan penyelesaian dengan ping ke pembeli dan tombol rating
+        if (editedExistingMessage) {
+          await sendChannelWithRetry(() =>
+            textChannel.send({
+              content: `<@${order.user.discordUserId}> Pesananmu telah selesai dikirim!`,
+              embeds: [completedEmbed],
+              components: [starRow, actionRow],
+            }),
+          );
+        } else {
+          // Fallback jika pesan sebelumnya tidak ditemukan
+          await sendChannelWithRetry(() =>
+            textChannel.send({
+              content: `<@${order.user.discordUserId}> Pesananmu telah selesai dikirim!`,
+              embeds: [sentEmbed, completedEmbed],
+              files: attachment ? [attachment] : [],
+              components: [starRow, actionRow],
+            }),
+          );
+        }
         console.log(`✅ Pesan transaksi selesai berhasil dikirim ke ticket #${channel.id}`);
       }
     } catch (err) {

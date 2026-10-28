@@ -135,15 +135,29 @@ export async function executeRobloxPlusTransfer(
 
       const page = context.pages()[0] ?? (await context.newPage());
 
-      // Monitor log dan error dari browser page / ekstensi
+      // Saring log dari browser agar log terminal tetap rapi dan bebas dari spam internal ekstensi
       page.on("console", (msg) => {
         const text = msg.text();
-        if (text.includes("RoValra") || text.includes("transfer") || text.includes("error")) {
+        if (
+          text.includes("status.rovalra.com") ||
+          text.includes("apis.rovalra.com") ||
+          text.includes("Non-donator lazy mode") ||
+          text.includes("heartbeat") ||
+          text.includes("Three.js") ||
+          text.includes("AngularJS") ||
+          text.includes("ApolloClient") ||
+          text.includes("Feature.Catalog")
+        ) {
+          return;
+        }
+        if (text.includes("RoValra Initialized") || (msg.type() === "error" && text.includes("transfer"))) {
           console.log(`[Browser Console] ${msg.type()}: ${text}`);
         }
       });
       page.on("pageerror", (err) => {
-        console.error(`[Browser PageError]`, err.message);
+        if (!err.message.includes("signal is aborted") && !err.message.includes("maxAttemptsReached")) {
+          console.error(`[Browser PageError]`, err.message);
+        }
       });
 
       // 1. Buka halaman profil Roblox penerima
@@ -263,8 +277,9 @@ export async function executeRobloxPlusTransfer(
       // Cek apakah ada overlay peringatan RoValra (misal 'Plus Needed' atau pesan error)
       try {
         const overlayText = await page.locator(".rovalra-global-overlay").allInnerTexts();
-        if (overlayText.length > 0) {
-          console.log("ℹ️ Teks overlay RoValra:", overlayText.join(" | "));
+        const joined = overlayText.join(" | ");
+        if (joined.toLowerCase().includes("error") || joined.toLowerCase().includes("needed") || joined.toLowerCase().includes("limit")) {
+          console.log("ℹ️ Teks peringatan RoValra:", joined);
         }
       } catch {}
 
@@ -377,7 +392,8 @@ export async function executeRobloxPlusTransfer(
             const urlParts = apiRes.url().split("/");
             const rawId = urlParts[urlParts.length - 1];
             if (rawId && rawId.length > 5) {
-              extId = rawId.startsWith("RXT-") ? rawId : `RXT-${rawId}`;
+              const cleanId = rawId.split("?")[0].split("#")[0].trim();
+              extId = cleanId.startsWith("RXT-") ? cleanId : `RXT-${cleanId}`;
             }
           }
         } catch {}

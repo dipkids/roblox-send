@@ -168066,6 +168066,7 @@ Total Load Time: ${(endTime - startTime).toFixed(2)}ms`
     }, 500), normalizeGamePageHash();
   }
   __name(setupUrlChangeListeners, "setupUrlChangeListeners");
+  console.log("=== ROVALRA CONTENT SCRIPT LOADED ===");
   initializePage();
   setupUrlChangeListeners();
 })();

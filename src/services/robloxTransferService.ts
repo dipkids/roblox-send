@@ -100,15 +100,23 @@ export async function executeRobloxPlusTransfer(
     let transferResult: TransferExecutionResult;
 
     try {
+      // Catatan penting untuk Playwright & Chromium extensions:
+      // Di Playwright, 'headless: true' menggunakan mode headless lama yang menonaktifkan ekstensi.
+      // Agar ekstensi Chrome (RoValra) aktif di lingkungan server/VPS tanpa GUI,
+      // kita gunakan 'headless: false' yang dipadukan dengan argumen '--headless=new'.
       context = await chromium.launchPersistentContext(profileDir, {
-        headless: isHeadless,
+        headless: false,
         viewport: { width: 1280, height: 800 },
         ignoreDefaultArgs: ["--enable-automation"],
         args: [
+          "--headless=new",
           "--disable-blink-features=AutomationControlled",
           `--disable-extensions-except=${extensionPath}`,
           `--load-extension=${extensionPath}`,
-          ...(isHeadless ? ["--headless=new"] : []),
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu",
         ],
       });
 
@@ -127,6 +135,17 @@ export async function executeRobloxPlusTransfer(
 
       const page = context.pages()[0] ?? (await context.newPage());
 
+      // Monitor log dan error dari browser page / ekstensi
+      page.on("console", (msg) => {
+        const text = msg.text();
+        if (text.includes("RoValra") || text.includes("transfer") || text.includes("error")) {
+          console.log(`[Browser Console] ${msg.type()}: ${text}`);
+        }
+      });
+      page.on("pageerror", (err) => {
+        console.error(`[Browser PageError]`, err.message);
+      });
+
       // 1. Buka halaman profil Roblox penerima
       console.log(
         `🌐 Membuka profil: https://www.roblox.com/users/${recipientRobloxId}/profile`,
@@ -141,9 +160,33 @@ export async function executeRobloxPlusTransfer(
 
       // Tunggu sesaat agar halaman dan ekstensi RoValra selesai diinjeksi
       console.log("⏳ Menunggu ekstensi dan halaman selesai dimuat...");
-      await page.waitForTimeout(2500);
+      await page.waitForTimeout(3000);
 
-      // 1b. Cek dan tutup popup Onboarding RoValra / Roblox+ jika muncul
+      // 1b. Tutup popup Roblox native jika ada (seperti promo Download Roblox di browser Linux)
+      try {
+        await page.evaluate(() => {
+          document
+            .querySelectorAll(
+              'button[aria-label*="Close" i], button.close, .modal-header button, [data-testid="modal-close-button"], .modal-dialog button',
+            )
+            .forEach((b) => (b as HTMLElement).click());
+          document
+            .querySelectorAll('.modal-dialog, .modal-backdrop, [role="dialog"]')
+            .forEach((el) => {
+              const text = el.textContent || "";
+              if (
+                text.includes("Download Roblox") ||
+                text.includes("Close") ||
+                el.classList.contains("modal-backdrop")
+              ) {
+                el.remove();
+              }
+            });
+          document.body.classList.remove("modal-open");
+        });
+      } catch {}
+
+      // 1c. Cek dan tutup popup Onboarding RoValra / Roblox+ jika muncul
       try {
         const onboardingBtn = page
           .locator(

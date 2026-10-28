@@ -1921,6 +1921,7 @@ app.use(
 );
 
 app.use("/admin", adminDashboard);
+app.use("/screenshots", express.static(process.cwd()));
 
 const PORT =
   Number(process.env.PORT) || 3000;

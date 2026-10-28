@@ -1,0 +1,72 @@
+name: Build and Release Extension
+
+on:
+    push:
+        tags:
+            - 'v*'
+
+    workflow_dispatch:
+
+jobs:
+    build-and-package:
+        permissions:
+            contents: write
+
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '20'
+                  cache: 'npm'
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Build extension
+              run: npm run build
+
+            - name: Package extension
+              run: |
+                  cd dist
+                  zip -r ../rovalra-${{ github.ref_name }}.zip .
+
+            - name: Package Firefox extension
+              run: |
+                  cd dist-firefox
+                  zip -r ../rovalra-firefox-${{ github.ref_name }}.zip .
+
+            - name: Package source code for AMO review
+              run: git archive --format=zip -o rovalra-source-${{ github.ref_name }}.zip HEAD
+
+            - name: Create GitHub Release
+              if: github.event_name == 'push'
+              uses: softprops/action-gh-release@v2
+              with:
+                  files: rovalra-${{ github.ref_name }}.zip
+              env:
+                  GITHUB_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+
+            - name: Upload to Chrome Web Store
+              if: github.event_name == 'push'
+              uses: mnao305/chrome-extension-upload@v6.0.0
+              with:
+                  file-path: rovalra-${{ github.ref_name }}.zip
+                  extension-id: ${{ secrets.EXTENSION_ID }}
+                  client-id: ${{ secrets.CLIENT_ID }}
+                  client-secret: ${{ secrets.CLIENT_SECRET }}
+                  refresh-token: ${{ secrets.REFRESH_TOKEN }}
+
+            - name: Upload to Firefox Add-ons
+              uses: wdzeng/firefox-addon@v1
+              with:
+                  addon-guid: '{7f4e2a91-6c83-4d15-9b72-a0e5f3c8146d}'
+                  xpi-path: rovalra-firefox-${{ github.ref_name }}.zip
+                  source-file-path: rovalra-source-${{ github.ref_name }}.zip
+                  self-hosted: false
+                  jwt-issuer: ${{ secrets.AMO_JWT_ISSUER }}
+                  jwt-secret: ${{ secrets.AMO_JWT_SECRET }}

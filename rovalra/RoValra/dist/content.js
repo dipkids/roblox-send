@@ -94118,37 +94118,7 @@ Bundled Items:
   }
   __name(sendParentPermissionRecieve, "sendParentPermissionRecieve");
   async function getSendRobuxStatus() {
-    let authedUserId = await getAuthenticatedUserId();
-    if (!authedUserId) return !1;
-    let cacheKey = `is_roblox_plus_${authedUserId}`, cached = await get("profile_data", cacheKey, "session");
-    if (cached !== void 0) return cached;
-    let profileApiPayload = {
-      profileId: authedUserId.toString(),
-      profileType: "User",
-      components: [{ component: "UserProfileHeader" }],
-      includeComponentOrdering: !0
-    };
-    return (async () => {
-      try {
-        let isRobloxPlus = (await callRobloxApiJson({
-          subdomain: "apis",
-          endpoint: "/profile-platform-api/v1/profiles/get",
-          method: "POST",
-          body: profileApiPayload
-        }))?.components?.UserProfileHeader?.isRobloxPlus === !0;
-        return await set(
-          "profile_data",
-          cacheKey,
-          isRobloxPlus,
-          "session"
-        ), isRobloxPlus;
-      } catch (err4) {
-        return console.error(
-          "RoValra: Failed to fetch currency transfer status.",
-          err4
-        ), !1;
-      }
-    })();
+    return true;
   }
   __name(getSendRobuxStatus, "getSendRobuxStatus");
   async function addSendRobuxButton(menu) {
@@ -94163,7 +94133,7 @@ Bundled Items:
       })
     );
     button.addEventListener("click", async () => {
-      if (canTransfer)
+      if (true)
         showStep1Popup(userId, null, window.event?.shiftKey || !1);
       else {
         let easterEgg = isAprilFools() || window.event?.shiftKey || !1, getPlusOverlay = createOverlay({
@@ -154676,37 +154646,7 @@ ${await t2("antiBots.processFailed", { failedCount: failedMembers.length })}`), 
   init_user();
   init_cacheHandler();
   async function getCurrencyTransferStatus() {
-    let authedUserId = await getAuthenticatedUserId();
-    if (!authedUserId) return !1;
-    let cacheKey = `is_roblox_plus_${authedUserId}`, cached = await get("profile_data", cacheKey, "session");
-    if (cached !== void 0) return cached;
-    let profileApiPayload = {
-      profileId: authedUserId.toString(),
-      profileType: "User",
-      components: [{ component: "UserProfileHeader" }],
-      includeComponentOrdering: !0
-    };
-    return (async () => {
-      try {
-        let isRobloxPlus = (await callRobloxApiJson({
-          subdomain: "apis",
-          endpoint: "/profile-platform-api/v1/profiles/get",
-          method: "POST",
-          body: profileApiPayload
-        }))?.components?.UserProfileHeader?.isRobloxPlus === !0;
-        return await set(
-          "profile_data",
-          cacheKey,
-          isRobloxPlus,
-          "session"
-        ), isRobloxPlus;
-      } catch (err4) {
-        return console.error(
-          "RoValra: Failed to fetch currency transfer status.",
-          err4
-        ), !1;
-      }
-    })();
+    return true;
   }
   __name(getCurrencyTransferStatus, "getCurrencyTransferStatus");
   async function addCurrencyTransferButton(menu) {

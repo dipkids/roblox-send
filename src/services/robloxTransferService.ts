@@ -197,6 +197,14 @@ export async function executeRobloxPlusTransfer(
       console.log("⏳ Menunggu modal Step 1 terbuka...");
       await page.waitForTimeout(2000);
 
+      // Cek apakah ada overlay peringatan RoValra (misal 'Plus Needed' atau pesan error)
+      try {
+        const overlayText = await page.locator(".rovalra-global-overlay").allInnerTexts();
+        if (overlayText.length > 0) {
+          console.log("ℹ️ Teks overlay RoValra:", overlayText.join(" | "));
+        }
+      } catch {}
+
       // Tunggu hingga modal Step 1 selesai loading
       await page.waitForSelector('.rovalra-sendrobux-container:not([data-rovalra-sendrobux-loading="true"])', {
         timeout: 10000,
@@ -371,6 +379,18 @@ export async function executeRobloxPlusTransfer(
       }
     } catch (browserError) {
       console.error("❌ Terjadi kegagalan automasi browser:", browserError);
+      if (context) {
+        try {
+          const pages = context.pages();
+          if (pages.length > 0) {
+            await pages[0].screenshot({
+              path: `transfer-error-${transfer.id}.png`,
+              fullPage: true,
+            });
+            console.log(`📸 Screenshot browser error tersimpan di transfer-error-${transfer.id}.png`);
+          }
+        } catch {}
+      }
       transferResult = {
         success: false,
         errorCode: "AUTOMATION_BROWSER_ERROR",

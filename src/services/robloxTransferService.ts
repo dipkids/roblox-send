@@ -158,9 +158,9 @@ export async function executeRobloxPlusTransfer(
         },
       );
 
-      // Tunggu sesaat agar halaman dan ekstensi RoValra selesai diinjeksi
-      console.log("⏳ Menunggu ekstensi dan halaman selesai dimuat...");
-      await page.waitForTimeout(3000);
+      // Berikan jeda yang cukup agar halaman Roblox dan ekstensi RoValra selesai diinjeksi sepenuhnya
+      console.log("⏳ Menunggu ekstensi dan halaman selesai dimuat (delay 5s)...");
+      await page.waitForTimeout(5000);
 
       // 1b. Tutup popup Roblox native jika ada (seperti promo Download Roblox di browser Linux)
       try {
@@ -171,12 +171,13 @@ export async function executeRobloxPlusTransfer(
             )
             .forEach((b) => (b as HTMLElement).click());
           document
-            .querySelectorAll('.modal-dialog, .modal-backdrop, [role="dialog"]')
+            .querySelectorAll('.modal-dialog, .modal-backdrop, [role="dialog"], .download-dialog')
             .forEach((el) => {
               const text = el.textContent || "";
               if (
                 text.includes("Download Roblox") ||
                 text.includes("Close") ||
+                text.includes("Roblox is now loading") ||
                 el.classList.contains("modal-backdrop")
               ) {
                 el.remove();
@@ -221,11 +222,17 @@ export async function executeRobloxPlusTransfer(
         )
         .first();
       await menuBtn.waitFor({ state: "visible", timeout: 15000 });
-      // Jeda sebelum klik tombol menu
-      await page.waitForTimeout(1200);
+      // Jeda sebelum klik tombol menu agar listener ekstensi siap
+      console.log("⏳ Jeda sebelum membuka menu profil...");
+      await page.waitForTimeout(2000);
       await menuBtn.click({ force: true });
       console.log("⏳ Menunggu dropdown menu terbuka...");
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(2500);
+
+      // Tunggu hingga ekstensi RoValra menambahkan tombolnya ke dalam menu
+      await page.waitForSelector('div[role="menu"][data-rovalra-send-robux-btn-added="true"], div[role="menu"]', {
+        timeout: 10000,
+      }).catch(() => {});
 
       // 3. Klik "Send Robux" yang diinjeksi oleh ekstensi Roblox+ / RoValra
       console.log("🖱️ Mengklik menuitem 'Send Robux'...");
@@ -234,11 +241,24 @@ export async function executeRobloxPlusTransfer(
         .or(page.locator('[role="menuitem"]:has-text("Send Robux"), button:has-text("Send Robux"), a:has-text("Send Robux")'))
         .first();
       await sendRobuxMenu.waitFor({ state: "visible", timeout: 15000 });
-      // Jeda sebelum klik Send Robux
-      await page.waitForTimeout(1200);
+      // Jeda sebelum klik Send Robux agar halaman stabil dan tidak trigger app deep-link
+      console.log("⏳ Jeda sebelum klik tombol Send Robux...");
+      await page.waitForTimeout(2000);
       await sendRobuxMenu.click({ force: true });
       console.log("⏳ Menunggu modal Step 1 terbuka...");
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(2500);
+
+      // Tutup download-dialog jika sempat terpemicu di background
+      try {
+        await page.evaluate(() => {
+          document.querySelectorAll('.download-dialog, .modal-dialog').forEach((el) => {
+            if (el.textContent?.includes("Roblox is now loading") || el.textContent?.includes("Download Roblox")) {
+              el.remove();
+            }
+          });
+          document.querySelectorAll('.modal-backdrop').forEach((el) => el.remove());
+        });
+      } catch {}
 
       // Cek apakah ada overlay peringatan RoValra (misal 'Plus Needed' atau pesan error)
       try {

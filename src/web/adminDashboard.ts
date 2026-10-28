@@ -249,7 +249,7 @@ router.delete("/api/senders/:id", async (req: Request, res: Response) => {
 // HALAMAN HTML DASHBOARD
 // ======================================================
 
-router.get("/dashboard", (req: Request, res: Response) => {
+router.get(["/", "/dashboard"], (req: Request, res: Response) => {
   const token = (req.query.token as string | undefined) ?? "";
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(renderPage(token));

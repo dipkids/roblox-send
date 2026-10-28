@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "../database/prisma.js";
 
 export const ADMIN_REVIEW_STATUSES = [
@@ -5,11 +6,30 @@ export const ADMIN_REVIEW_STATUSES = [
   "SENDER_LIMIT_ERROR",
 ] as const;
 
-export async function getManualReviewOrders() {
+export const UNPAID_STATUSES = [
+  "PAYMENT_PENDING",
+  "WAITING_PAYMENT",
+  "CREATED",
+] as const;
+
+export type AdminReviewFilter = "review" | "unpaid" | "all";
+
+export async function getManualReviewOrders(
+  filter: AdminReviewFilter = "review",
+) {
+  let where: Prisma.OrderWhereInput = {};
+
+  if (filter === "unpaid") {
+    where = { status: { in: [...UNPAID_STATUSES] } };
+  } else if (filter === "review") {
+    where = { status: { in: [...ADMIN_REVIEW_STATUSES] } };
+  } else {
+    // "all": tampilkan order terbaru tanpa batasan status
+    where = {};
+  }
+
   return prisma.order.findMany({
-    where: {
-      status: { in: [...ADMIN_REVIEW_STATUSES] },
-    },
+    where,
     include: {
       user: true,
       robloxProfile: true,
@@ -21,24 +41,22 @@ export async function getManualReviewOrders() {
       },
     },
     orderBy: {
-      updatedAt: "asc",
+      updatedAt: "desc",
     },
     take: 10,
   });
 }
 
-export async function getManualReviewOrder(
-  orderId: number,
-) {
+export async function getManualReviewOrder(orderId: number) {
   return prisma.order.findFirst({
     where: {
       id: orderId,
-      status: { in: [...ADMIN_REVIEW_STATUSES] },
     },
     include: {
       user: true,
       robloxProfile: true,
       payment: true,
+      ticket: true,
       transfers: {
         include: {
           senderAccount: true,
@@ -66,58 +84,43 @@ export async function getManualReviewOrder(
 export async function acknowledgeManualReview(
   orderId: number,
   adminDiscordId: string,
+  note?: string,
 ) {
-  return prisma.$transaction(
-    async (tx) => {
-      const lockedOrders = await tx.$queryRaw<
-        Array<{ id: number; status: string }>
-      >`
-        SELECT id, status
-        FROM "Order"
-        WHERE id = ${orderId}
-        FOR UPDATE
-      `;
+  return prisma.$transaction(async (tx) => {
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      select: { id: true, status: true },
+    });
 
-      if (lockedOrders.length === 0) {
-        throw new Error("Order tidak ditemukan.");
-      }
+    if (!order) {
+      throw new Error("Order tidak ditemukan.");
+    }
 
-      const order = lockedOrders[0];
+    await tx.adminAction.create({
+      data: {
+        orderId,
+        adminDiscordId,
+        action: "ACKNOWLEDGE",
+        oldStatus: order.status,
+        newStatus: order.status,
+        reason: note,
+      },
+    });
 
-      if (
-        !(ADMIN_REVIEW_STATUSES as readonly string[]).includes(order.status)
-      ) {
-        throw new Error(
-          `Order tidak lagi membutuhkan pemeriksaan admin. Status sekarang: ${order.status}`,
-        );
-      }
-
-      const reason = "Admin telah memeriksa detail order.";
-
-      await tx.adminAction.create({
-        data: {
-          orderId,
+    await tx.orderEvent.create({
+      data: {
+        orderId,
+        eventType: "ADMIN_ACKNOWLEDGED",
+        oldStatus: order.status,
+        newStatus: order.status,
+        description: "Admin telah melihat dan memeriksa order ini.",
+        metadata: {
           adminDiscordId,
-          action: "REVIEW_ACKNOWLEDGED",
-          oldStatus: order.status,
-          newStatus: order.status,
-          reason,
+          note: note ?? null,
         },
-      });
+      },
+    });
 
-      await tx.orderEvent.create({
-        data: {
-          orderId,
-          eventType: "ADMIN_REVIEW_ACKNOWLEDGED",
-          oldStatus: order.status,
-          newStatus: order.status,
-          description: reason,
-          metadata: { adminDiscordId },
-        },
-      });
-
-      return { orderId, status: order.status };
-    },
-    { maxWait: 30000, timeout: 30000 },
-  );
+    return { success: true };
+  });
 }

@@ -16,11 +16,16 @@ import {
   updateLimits,
 } from "../services/senderAdminService.js";
 
+import { getSendersLiveEconomy } from "../services/robloxEconomyService.js";
+import { refreshOrderPanel } from "../services/orderPanelService.js";
+
 export const data = new SlashCommandBuilder()
   .setName("sender")
   .setDescription("Kelola akun sender Robux (khusus admin)")
   .addSubcommand((sub) =>
-    sub.setName("list").setDescription("Lihat semua sender dan sisa kuotanya"),
+    sub
+      .setName("list")
+      .setDescription("Lihat semua sender, saldo, dan limit langsung dari Roblox"),
   )
   .addSubcommand((sub) =>
     sub
@@ -103,12 +108,12 @@ export const data = new SlashCommandBuilder()
   .addSubcommand((sub) =>
     sub
       .setName("sync")
-      .setDescription("Sinkronkan pemakaian dari Roblox, atau isi manual")
+      .setDescription("Sinkronkan limit & saldo dari Roblox (kosongkan ID untuk semua sender)")
       .addIntegerOption((o) =>
         o
           .setName("id")
-          .setDescription("ID sender")
-          .setRequired(true)
+          .setDescription("ID sender (opsional, kosongkan untuk sinkronkan semua akun)")
+          .setRequired(false)
           .setMinValue(1),
       )
       .addIntegerOption((o) =>
@@ -136,6 +141,10 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     // LIST
     // ==============================
     if (sub === "list") {
+      // Tarik live economy dari Roblox langsung agar data selalu real-time
+      const liveEconomy = await getSendersLiveEconomy().catch(() => []);
+      const liveMap = new Map(liveEconomy.map((l) => [l.id, l]));
+
       const senders = await listSenders();
 
       if (senders.length === 0) {
@@ -146,23 +155,30 @@ export async function execute(interaction: ChatInputCommandInteraction) {
       }
 
       const embed = new EmbedBuilder()
-        .setTitle("🏦 Sender Accounts")
+        .setTitle("🏦 Akun Sender Roblox (Live Economy & Limit)")
         .setColor(0x3498db)
         .setDescription(
-          "Pemakaian berasal dari counter lokal. Jalankan `/sender sync` untuk menyelaraskan dengan Roblox.",
-        );
+          "Data limit, pemakaian, dan saldo otomatis tersinkronisasi secara real-time dari Roblox API.",
+        )
+        .setTimestamp();
 
       for (const sender of senders.slice(0, 25)) {
         const usage = effectiveUsage(sender);
+        const live = liveMap.get(sender.id);
+        const balanceLine =
+          live && typeof live.robuxBalance === "number"
+            ? `💰 Saldo: **${fmt(live.robuxBalance)} Robux**\n`
+            : "";
 
         embed.addFields({
-          name: `#${sender.id} · ${sender.accountName} · ${sender.status}`,
+          name: `#${sender.id} · ${sender.accountName} · [${sender.status}]`,
           value: [
-            `Roblox ID: ${sender.robloxUserId}`,
-            `Harian: ${fmt(usage.dailyUsed)} / ${fmt(sender.dailyLimit)} ` +
-              `(sisa ${fmt(Math.max(sender.dailyLimit - usage.dailyUsed, 0))})`,
-            `Bulanan: ${fmt(usage.monthlyUsed)} / ${fmt(sender.monthlyLimit)} ` +
-              `(sisa ${fmt(Math.max(sender.monthlyLimit - usage.monthlyUsed, 0))})`,
+            `Roblox ID: \`${sender.robloxUserId}\``,
+            balanceLine +
+            `Harian: **${fmt(usage.dailyUsed)}** / ${fmt(sender.dailyLimit)} ` +
+              `(sisa **${fmt(Math.max(sender.dailyLimit - usage.dailyUsed, 0))} Robux**)`,
+            `Bulanan: **${fmt(usage.monthlyUsed)}** / ${fmt(sender.monthlyLimit)} ` +
+              `(sisa **${fmt(Math.max(sender.monthlyLimit - usage.monthlyUsed, 0))} Robux**)`,
             `Transfer berjalan: ${sender.activeTransfers}` +
               (sender.inFlightRobux > 0
                 ? ` (${fmt(sender.inFlightRobux)} Robux)`
@@ -189,6 +205,9 @@ export async function execute(interaction: ChatInputCommandInteraction) {
         adminId,
       );
 
+      // Refresh panel order Discord
+      refreshOrderPanel(interaction.client).catch(() => {});
+
       await interaction.editReply({
         content:
           `✅ Sender **#${sender.id} ${sender.accountName}** ditambahkan ` +
@@ -203,21 +222,31 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     // ==============================
     if (sub === "limit") {
       const id = interaction.options.getInteger("id", true);
+      const daily = interaction.options.getInteger("limit_harian");
+      const monthly = interaction.options.getInteger("limit_bulanan");
+
+      if (daily === null && monthly === null) {
+        await interaction.editReply({
+          content: "⚠️ Masukkan minimal satu: `limit_harian` atau `limit_bulanan`.",
+        });
+        return;
+      }
 
       const result = await updateLimits(
         id,
         {
-          dailyLimit:
-            interaction.options.getInteger("limit_harian") ?? undefined,
-          monthlyLimit:
-            interaction.options.getInteger("limit_bulanan") ?? undefined,
+          dailyLimit: daily ?? undefined,
+          monthlyLimit: monthly ?? undefined,
         },
         adminId,
       );
 
+      // Refresh panel order Discord
+      refreshOrderPanel(interaction.client).catch(() => {});
+
       await interaction.editReply({
         content:
-          `✅ Limit sender **#${id}** diperbarui.\n` +
+          `✅ Limit sender **#${id}** diperbarui:\n` +
           `Harian: ${fmt(result.before.dailyLimit)} → ${fmt(result.after.dailyLimit)}\n` +
           `Bulanan: ${fmt(result.before.monthlyLimit)} → ${fmt(result.after.monthlyLimit)}`,
       });
@@ -236,6 +265,9 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
       const result = await setSenderStatus(id, status, adminId);
 
+      // Refresh panel order Discord
+      refreshOrderPanel(interaction.client).catch(() => {});
+
       await interaction.editReply({
         content: `✅ Status sender **#${id}**: ${result.before.status} → ${result.after.status}`,
       });
@@ -246,10 +278,44 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     // SYNC
     // ==============================
     if (sub === "sync") {
-      const id = interaction.options.getInteger("id", true);
+      const id = interaction.options.getInteger("id");
       const daily = interaction.options.getInteger("harian_terpakai");
       const monthly = interaction.options.getInteger("bulanan_terpakai");
 
+      // 1. SINKRONKAN SEMUA SENDER JIKA ID TIDAK DIBERIKAN
+      if (id === null) {
+        const liveResults = await getSendersLiveEconomy();
+        await refreshOrderPanel(interaction.client).catch(() => {});
+
+        const embed = new EmbedBuilder()
+          .setTitle("🔄 Sinkronisasi Semua Akun Sender Selesai")
+          .setColor(0x2ecc71)
+          .setDescription(
+            `Berhasil menyinkronkan data pemakaian limit dan saldo Roblox untuk **${liveResults.length} akun sender**. Panel order Discord juga telah diperbarui.`,
+          )
+          .setTimestamp();
+
+        for (const s of liveResults) {
+          const bal =
+            typeof s.robuxBalance === "number"
+              ? `💰 Saldo: **${fmt(s.robuxBalance)} Robux**\n`
+              : "";
+          embed.addFields({
+            name: `#${s.id} · ${s.accountName} · [${s.status}]`,
+            value: [
+              `Roblox ID: \`${s.robloxUserId}\``,
+              bal +
+              `Harian: **${fmt(s.dailyUsed)}** / ${fmt(s.dailyLimit)} (sisa **${fmt(s.dailyRemaining)} Robux**)`,
+              `Bulanan: **${fmt(s.monthlyUsed)}** / ${fmt(s.monthlyLimit)} (sisa **${fmt(s.monthlyRemaining)} Robux**)`,
+            ].join("\n"),
+          });
+        }
+
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      // 2. SINKRONKAN SENDER TERTENTU
       if ((daily === null) !== (monthly === null)) {
         await interaction.editReply({
           content:
@@ -272,6 +338,9 @@ export async function execute(interaction: ChatInputCommandInteraction) {
           ? { dailyUsed: daily, monthlyUsed: monthly }
           : undefined,
       );
+
+      // Refresh panel order Discord
+      refreshOrderPanel(interaction.client).catch(() => {});
 
       const lines = [
         `✅ Sender **#${id}** disinkronkan (sumber: ${result.source === "ROBLOX" ? "Roblox" : "isian manual"}).`,

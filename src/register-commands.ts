@@ -1,4 +1,10 @@
 import "dotenv/config";
+import dns from "node:dns";
+
+if (typeof dns.setDefaultResultOrder === "function") {
+  dns.setDefaultResultOrder("ipv4first");
+}
+
 import {
   REST,
   Routes,
@@ -6,6 +12,8 @@ import {
 
 import { data as orderCommand } from "./commands/order.js";
 import { data as visendRateCommand } from "./commands/visendRate.js";
+import { data as visendMinCommand } from "./commands/visendMin.js";
+import { data as visendCustomCommand } from "./commands/visendCustom.js";
 import { data as adminReviewCommand } from "./commands/adminReview.js";
 import { data as senderCommand } from "./commands/sender.js";
 
@@ -28,21 +36,29 @@ if (!guildId) {
 const commands = [
   orderCommand.toJSON(),
   visendRateCommand.toJSON(),
+  visendMinCommand.toJSON(),
+  visendCustomCommand.toJSON(),
   adminReviewCommand.toJSON(),
   senderCommand.toJSON(),
 ];
 
 const rest = new REST({ version: "10" }).setToken(token);
 
-try {
-  console.log("Mendaftarkan slash commands...");
+for (let attempt = 1; attempt <= 3; attempt++) {
+  try {
+    console.log(`Mendaftarkan slash commands (percobaan ${attempt})...`);
 
-  await rest.put(
-    Routes.applicationGuildCommands(clientId, guildId),
-    { body: commands },
-  );
+    await rest.put(
+      Routes.applicationGuildCommands(clientId, guildId),
+      { body: commands },
+    );
 
-  console.log("✅ Slash commands berhasil didaftarkan.");
-} catch (error) {
-  console.error("❌ Gagal mendaftarkan slash commands:", error);
+    console.log("✅ Slash commands berhasil didaftarkan.");
+    break;
+  } catch (error) {
+    console.error(`❌ Gagal mendaftarkan slash commands (percobaan ${attempt}):`, error);
+    if (attempt < 3) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
 }

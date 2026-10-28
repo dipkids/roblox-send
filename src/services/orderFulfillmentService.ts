@@ -1,9 +1,10 @@
 import { prisma } from "../database/prisma.js";
 import { reserveSenderForOrder } from "./transferService.js";
 import { startTransfer } from "./transferExecutor.js";
-import { executeMockTransfer } from "./robloxTransferService.js";
+import { executeTransfer } from "./robloxTransferService.js";
+import { sendOrderCompletionReceipt, sendTicketProcessingEmbed } from "./ticketService.js";
 import { verifyTransfer } from "./transferVerificationService.js";
-import { notifyAdminOrder } from "./adminNotificationService.js";
+import { notifyAdminOrder, getNotificationClient } from "./adminNotificationService.js";
 import { handleTransferFailure, type FailureOrigin, } from "./transferFailureService.js";
 
 const inFlight = new Set<number>();
@@ -546,6 +547,18 @@ async function runFulfillment(orderId: number, origin: FailureOrigin) {
       `✅ Transfer started: ${startedTransfer.transfer.id}`,
     );
 
+    const discordClientStart = getNotificationClient();
+    if (discordClientStart) {
+      const senderAcc = await prisma.senderAccount.findUnique({
+        where: { id: startedTransfer.transfer.senderAccountId },
+      });
+      await sendTicketProcessingEmbed({
+        client: discordClientStart,
+        orderId,
+        senderAccountName: senderAcc?.accountName,
+      }).catch((err) => console.error("Gagal kirim processing embed:", err));
+    }
+
     // Refresh order
     order = await prisma.order.findUnique({
       where: { id: orderId },
@@ -590,7 +603,7 @@ async function runFulfillment(orderId: number, origin: FailureOrigin) {
 
     const simulateMockFailure = process.env.MOCK_TRANSFER_FAIL === "true";
 
-    const completedTransfer = await executeMockTransfer(
+    const completedTransfer = await executeTransfer(
       processingTransfer.id,
       simulateMockFailure
         ? {
@@ -684,6 +697,15 @@ async function runFulfillment(orderId: number, origin: FailureOrigin) {
     console.log(
       `🎉 Order completed: ${completedOrder.orderNumber}`,
     );
+    const discordClient = getNotificationClient();
+    if (discordClient) {
+      await sendOrderCompletionReceipt({
+        client: discordClient,
+        orderId: completedOrder.id,
+      }).catch((receiptErr) => {
+        console.error("❌ Gagal mengirim struk digital ke pembeli:", receiptErr);
+      });
+    }
 
     console.log("========================================");
     console.log("ORDER FULFILLMENT COMPLETED");

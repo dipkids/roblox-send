@@ -8,6 +8,7 @@ import {
   getRobuxRate,
   setRobuxRate,
 } from "../services/rateService.js";
+import { refreshOrderPanel } from "../services/orderPanelService.js";
 
 export const data = new SlashCommandBuilder()
   .setName("visend_rate")
@@ -62,6 +63,9 @@ export async function execute(
     const newRate = await setRobuxRate(rate);
 
     console.log(`💰 Rate diubah oleh ${interaction.user.id}: Rp${newRate}/Robux`);
+
+    // Perbarui panel order Discord secara otomatis
+    refreshOrderPanel(interaction.client).catch(() => {});
 
     await interaction.editReply({
       content:

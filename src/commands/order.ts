@@ -1,58 +1,62 @@
 import {
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
   ChatInputCommandInteraction,
   MessageFlags,
   SlashCommandBuilder,
+  TextChannel,
 } from "discord.js";
+
+import {
+  buildOrderPanel,
+  getOrderPanelReference,
+  saveOrderPanelReference,
+} from "../services/orderPanelService.js";
 
 export const data = new SlashCommandBuilder()
   .setName("order")
-  .setDescription("Mulai order Robux");
+  .setDescription("Pasang / perbarui panel order Robux di channel");
 
-export async function execute(
-  interaction: ChatInputCommandInteraction,
-) {
-  const row1 = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId("robux_100")
-      .setLabel("100 Robux")
-      .setStyle(ButtonStyle.Primary),
+export async function execute(interaction: ChatInputCommandInteraction) {
+  const { embed, components } = await buildOrderPanel();
 
-    new ButtonBuilder()
-      .setCustomId("robux_300")
-      .setLabel("300 Robux")
-      .setStyle(ButtonStyle.Primary),
+  const channel = interaction.channel;
+  if (channel && "send" in channel && interaction.inGuild()) {
+    // Coba hapus panel order lama jika ada di channel yang sama untuk mencegah pesan dobel
+    const oldRef = await getOrderPanelReference();
+    if (oldRef && oldRef.channelId === channel.id) {
+      try {
+        const oldMsg = await (channel as TextChannel).messages
+          .fetch(oldRef.messageId)
+          .catch(() => null);
+        if (oldMsg) {
+          await oldMsg.delete().catch(() => {});
+        }
+      } catch {
+        // Abaikan jika pesan lama sudah dihapus manual
+      }
+    }
 
-    new ButtonBuilder()
-      .setCustomId("robux_500")
-      .setLabel("500 Robux")
-      .setStyle(ButtonStyle.Primary),
-  );
+    // Kirim pesan panel murni dari bot (tanpa header 'user used /order')
+    const panelMessage = await (channel as TextChannel).send({
+      embeds: [embed],
+      components,
+    });
 
-  const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId("robux_1000")
-      .setLabel("1000 Robux")
-      .setStyle(ButtonStyle.Primary),
+    // Simpan referensi pesan & channel agar bisa di-update otomatis setiap ada pembelian & tiap 30 menit
+    await saveOrderPanelReference(panelMessage.channelId, panelMessage.id);
 
-    new ButtonBuilder()
-      .setCustomId("robux_3000")
-      .setLabel("3000 Robux")
-      .setStyle(ButtonStyle.Primary),
+    // Balas interaction secara ephemeral (hanya dilihat oleh yang menjalankan command)
+    await interaction.reply({
+      content:
+        "✅ **Panel order Robux berhasil dipasang di channel ini.**\n" +
+        "Pesan ditampilkan bersih murni dari bot tanpa nama kamu di atasnya.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
 
-    new ButtonBuilder()
-      .setCustomId("custom_order")
-      .setLabel("Custom Order")
-      .setStyle(ButtonStyle.Secondary),
-  );
-
+  // Fallback jika tidak berada di text channel
   await interaction.reply({
-    content:
-      "🛒 **AutoVisend — Robux Order**\n\n" +
-      "Pilih jumlah Robux yang ingin kamu beli:",
-    components: [row1, row2],
-    flags: MessageFlags.Ephemeral,
+    embeds: [embed],
+    components,
   });
 }

@@ -1,4 +1,10 @@
 import "dotenv/config";
+import dns from "node:dns";
+
+if (typeof dns.setDefaultResultOrder === "function") {
+  dns.setDefaultResultOrder("ipv4first");
+}
+
 import express from "express";
 
 import {
@@ -14,9 +20,20 @@ import {
   MessageFlags,
   Interaction,
   ModalSubmitInteraction,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } from "discord.js";
 
+import {
+  saveBuyerRating,
+  isOrderRated,
+  sendVouchEmbed,
+} from "./services/storeDatabaseService.js";
+
 import * as visendRateCommand from "./commands/visendRate.js";
+import * as visendMinCommand from "./commands/visendMin.js";
+import * as visendCustomCommand from "./commands/visendCustom.js";
 import * as orderCommand from "./commands/order.js";
 import * as adminReviewCommand from "./commands/adminReview.js";
 
@@ -26,7 +43,11 @@ import { showRobloxProfileModal } from "./modals/robloxProfile.js";
 import { findRobloxUser } from "./services/robloxService.js";
 import { showRobloxConfirmation } from "./buttons/robloxConfirm.js";
 
+import { prisma } from "./database/prisma.js";
 import { getRobuxRate } from "./services/rateService.js";
+import { getMinRobuxAmount } from "./services/minOrderService.js";
+import { isCustomOrderEnabled } from "./services/customOrderSettingService.js";
+import { getSenderStockStatus } from "./services/senderService.js";
 import { OrderValidationError, createOrder, isValidRobuxAmount, } from "./services/orderService.js";
 import { createOrderTicket, sendOrderTicketMessage } from "./services/ticketService.js";
 import { createDynamicQris } from "./services/paymentService.js";
@@ -39,6 +60,9 @@ import { setNotificationClient } from "./services/adminNotificationService.js";
 import { showAdminActionModal, type AdminActionType } from "./modals/adminAction.js";
 import { adminRetryOrder, adminMarkCompleted, adminCancelOrder, } from "./services/adminActionService.js";
 import * as senderCommand from "./commands/sender.js";
+import adminDashboard from "./web/adminDashboard.js";
+import { getSendersLiveEconomy } from "./services/robloxEconomyService.js";
+import { refreshOrderPanel } from "./services/orderPanelService.js";
 
 import { showTransferCancelModal } from "./modals/transferCancel.js";
 import {
@@ -48,7 +72,11 @@ import {
   customerRetryAfter2FA,
   isOrderOwner,
 } from "./services/transferFailureService.js";
-import { runBackgroundWorkers } from "./services/reconciliationService.js";
+import {
+  runBackgroundWorkers,
+  reconcilePayments,
+  checkAndFulfillOrderPayment,
+} from "./services/reconciliationService.js";
 
 // ==============================
 // ENV
@@ -92,9 +120,23 @@ function hasAdminRole(
     | ButtonInteraction
     | ModalSubmitInteraction,
 ): boolean {
+  if (!interaction.inGuild()) {
+    return false;
+  }
+
+  // Guild Owner selalu dianggap Admin
+  if (interaction.guild?.ownerId === interaction.user.id) {
+    return true;
+  }
+
+  // Member dengan permission Administrator selalu dianggap Admin
+  if (interaction.memberPermissions?.has("Administrator")) {
+    return true;
+  }
+
   const adminRoleId = process.env.ADMIN_ROLE_ID;
 
-  if (!adminRoleId || !interaction.inGuild()) {
+  if (!adminRoleId) {
     return false;
   }
 
@@ -161,6 +203,11 @@ client.once("ready", async () => {
   //  - escalateStaleCustomerWaits
   // ==============================
 
+  // Fast payment polling: cek pembayaran pending tiap 5 detik agar instan tanpa delay
+  setInterval(() => {
+    reconcilePayments().catch(() => {});
+  }, 5_000);
+
   setInterval(() => {
     runBackgroundWorkers().catch((error) => {
       console.error(
@@ -169,6 +216,28 @@ client.once("ready", async () => {
       );
     });
   }, 60_000);
+
+  // 1. Sinkronisasi awal ekonomi sender Roblox & panel order Discord saat bot online
+  setTimeout(async () => {
+    try {
+      console.log("🔄 Melakukan sinkronisasi awal limit sender Roblox & panel order Discord...");
+      await getSendersLiveEconomy();
+      await refreshOrderPanel(client);
+    } catch (err) {
+      console.warn("⚠️ Gagal sinkronisasi awal sender / panel order:", err);
+    }
+  }, 3_000);
+
+  // 2. Auto-sync sender economy Roblox & perbarui panel order di Discord setiap 30 menit
+  setInterval(async () => {
+    try {
+      console.log("⏰ [30 Menit Worker] Sinkronisasi limit Roblox & update panel order Discord...");
+      await getSendersLiveEconomy();
+      await refreshOrderPanel(client);
+    } catch (err) {
+      console.warn("⚠️ Gagal worker 30 menit panel order:", err);
+    }
+  }, 30 * 60 * 1_000);
 });
 
 // ==============================
@@ -197,6 +266,16 @@ async function handleInteraction(interaction: Interaction) {
       interaction.commandName ===
       orderCommand.data.name
     ) {
+      if (!(await hasAdminRole(interaction))) {
+        await interaction.reply({
+          content:
+            "⛔ Hanya admin yang dapat memasang atau memperbarui panel order di channel ini.\n" +
+            "Untuk membeli Robux, silakan klik tombol nominal pada panel order yang sudah tersedia di channel.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
       await orderCommand.execute(interaction);
       return;
     }
@@ -215,6 +294,40 @@ async function handleInteraction(interaction: Interaction) {
       }
 
       await visendRateCommand.execute(interaction);
+      return;
+    }
+
+    // ==============================
+    // /visend_min
+    // ==============================
+
+    if (interaction.commandName === visendMinCommand.data.name) {
+      if (!(await hasAdminRole(interaction))) {
+        await interaction.reply({
+          content: "⛔ Kamu tidak memiliki akses admin.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      await visendMinCommand.execute(interaction);
+      return;
+    }
+
+    // ==============================
+    // /visend_custom
+    // ==============================
+
+    if (interaction.commandName === visendCustomCommand.data.name) {
+      if (!(await hasAdminRole(interaction))) {
+        await interaction.reply({
+          content: "⛔ Kamu tidak memiliki akses admin.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      await visendCustomCommand.execute(interaction);
       return;
     }
 
@@ -466,22 +579,42 @@ async function handleInteraction(interaction: Interaction) {
             "Belum ada event.",
         });
 
-        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`admin_review_retry_${order.id}`)
-            .setLabel("Proses Ulang")
-            .setEmoji("🔄")
-            .setStyle(ButtonStyle.Primary),
-          new ButtonBuilder()
-            .setCustomId(`admin_review_complete_${order.id}`)
-            .setLabel("Tandai Selesai")
-            .setEmoji("✅")
-            .setStyle(ButtonStyle.Success),
-          new ButtonBuilder()
-            .setCustomId(`admin_review_cancel_${order.id}`)
-            .setLabel("Batalkan & Refund")
-            .setEmoji("↩️")
-            .setStyle(ButtonStyle.Danger),
+        const row = new ActionRowBuilder<ButtonBuilder>();
+
+        const isUnpaid =
+          order.status === "CREATED" ||
+          order.status === "WAITING_PAYMENT" ||
+          order.status === "PAYMENT_PENDING";
+
+        const isFinished =
+          order.status === "COMPLETED" || order.status === "CANCELLED";
+
+        if (!isFinished && !isUnpaid) {
+          row.addComponents(
+            new ButtonBuilder()
+              .setCustomId(`admin_review_retry_${order.id}`)
+              .setLabel("Proses Ulang")
+              .setEmoji("🔄")
+              .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+              .setCustomId(`admin_review_complete_${order.id}`)
+              .setLabel("Tandai Selesai")
+              .setEmoji("✅")
+              .setStyle(ButtonStyle.Success),
+          );
+        }
+
+        if (!isFinished) {
+          row.addComponents(
+            new ButtonBuilder()
+              .setCustomId(`admin_review_cancel_${order.id}`)
+              .setLabel(isUnpaid ? "Batalkan Order" : "Batalkan & Refund")
+              .setEmoji("↩️")
+              .setStyle(ButtonStyle.Danger),
+          );
+        }
+
+        row.addComponents(
           new ButtonBuilder()
             .setCustomId(`admin_review_ack_${order.id}`)
             .setLabel("Catat Diperiksa")
@@ -587,6 +720,24 @@ async function handleInteraction(interaction: Interaction) {
     if (
       interaction.customId === "custom_order"
     ) {
+      const isEnabled = await isCustomOrderEnabled();
+      if (!isEnabled) {
+        await interaction.reply({
+          content: "❌ Fitur Custom Order saat ini sedang dinonaktifkan oleh admin.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      const stock = await getSenderStockStatus();
+      if (stock.allLimitReached) {
+        await interaction.reply({
+          content: "❌ Semua akun sender telah mencapai batas limit harian/bulanan. Pembelian ditutup sementara.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
       await showCustomOrderModal(interaction);
       return;
     }
@@ -607,15 +758,28 @@ async function handleInteraction(interaction: Interaction) {
         ),
       );
 
-      if (
-        !Number.isInteger(amount) ||
-        amount < 100 ||
-        amount > 5000 ||
-        amount % 100 !== 0
-      ) {
+      const stock = await getSenderStockStatus();
+      if (stock.allLimitReached) {
+        await interaction.reply({
+          content: "❌ Semua akun sender telah mencapai batas limit harian/bulanan. Pembelian ditutup sementara.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      if (stock.maxAvailableRobux < amount) {
+        await interaction.reply({
+          content: `❌ Stok Robux sender saat ini tidak mencukupi untuk order sebesar **${amount.toLocaleString("id-ID")} Robux** (Tersedia: **${stock.maxAvailableRobux.toLocaleString("id-ID")} Robux**).`,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      if (!(await isValidRobuxAmount(amount))) {
+        const minRobux = await getMinRobuxAmount();
         await interaction.reply({
           content:
-            "❌ Jumlah Robux tidak valid.",
+            `❌ Jumlah Robux minimal adalah **${minRobux} Robux** dan maksimal **5000 Robux**.`,
           flags: MessageFlags.Ephemeral,
         });
 
@@ -646,9 +810,27 @@ async function handleInteraction(interaction: Interaction) {
         ),
       );
 
-      if (!isValidRobuxAmount(amount)) {
+      const stock = await getSenderStockStatus();
+      if (stock.allLimitReached) {
         await interaction.reply({
-          content: "❌ Jumlah Robux tidak valid.",
+          content: "❌ Semua akun sender telah mencapai batas limit harian/bulanan. Pembelian ditutup sementara.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      if (stock.maxAvailableRobux < amount) {
+        await interaction.reply({
+          content: `❌ Stok Robux sender saat ini tidak mencukupi untuk paket **${amount.toLocaleString("id-ID")} Robux** (Tersedia: **${stock.maxAvailableRobux.toLocaleString("id-ID")} Robux**).`,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      if (!(await isValidRobuxAmount(amount))) {
+        const minRobux = await getMinRobuxAmount();
+        await interaction.reply({
+          content: `❌ Jumlah Robux tidak valid. Minimal **${minRobux} Robux**.`,
           flags: MessageFlags.Ephemeral,
         });
 
@@ -714,7 +896,25 @@ async function handleInteraction(interaction: Interaction) {
 
       await interaction.deferUpdate();
 
+      let ticketChannel: any = null;
+      let createdOrderId: number | null = null;
+
       try {
+        // ========================================
+        // CHECK SENDER STOCK & LIMIT
+        // ========================================
+
+        const stock = await getSenderStockStatus();
+        if (stock.allLimitReached || stock.maxAvailableRobux < amount) {
+          await interaction.followUp({
+            content:
+              "❌ **Stok limit Robux sender telah habis atau tidak mencukupi untuk order ini.**\n\n" +
+              "Silakan tunggu reset limit atau hubungi admin.",
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+
         // ========================================
         // GET CURRENT RATE
         // ========================================
@@ -752,6 +952,8 @@ async function handleInteraction(interaction: Interaction) {
             rate,
           });
 
+        createdOrderId = result.order.id;
+
         // ========================================
         // CATEGORY
         // ========================================
@@ -779,7 +981,7 @@ async function handleInteraction(interaction: Interaction) {
         // CREATE DISCORD TICKET
         // ========================================
 
-        const ticketChannel =
+        ticketChannel =
           await createOrderTicket({
             client,
 
@@ -827,12 +1029,12 @@ async function handleInteraction(interaction: Interaction) {
           });
 
         // ========================================
-        // CHECK QR CODE
+        // CHECK PAYMENT URL / QR CODE
         // ========================================
 
-        if (!qris.qrCodeUrl) {
+        if (!qris.qrCodeUrl && !qris.paymentUrl) {
           throw new Error(
-            "QRIS URL dari Midtrans tidak tersedia.",
+            "URL pembayaran QRIS dari Midtrans tidak tersedia.",
           );
         }
 
@@ -868,6 +1070,9 @@ async function handleInteraction(interaction: Interaction) {
           qrCodeUrl:
             qris.qrCodeUrl,
 
+          paymentUrl:
+            qris.paymentUrl,
+
           expiredAt:
             qris.expiredAt,
         });
@@ -884,6 +1089,12 @@ async function handleInteraction(interaction: Interaction) {
         // UPDATE ORIGINAL INTERACTION
         // ========================================
 
+        const paymentNotice = qris.paymentUrl
+          ? "💳 Tombol pembayaran QRIS sudah tersedia di ticket.\n" +
+            "⏳ Pembayaran akan terdeteksi otomatis."
+          : "💳 QRIS pembayaran sudah tersedia di ticket.\n" +
+            "⏳ Pembayaran akan terdeteksi otomatis.";
+
         await interaction.editReply({
           content:
             "✅ **Order berhasil dibuat!**\n\n" +
@@ -899,8 +1110,7 @@ async function handleInteraction(interaction: Interaction) {
               "id-ID",
             )}**\n\n` +
             `🎫 **Ticket:** <#${ticketChannel.id}>\n\n` +
-            "💳 QRIS pembayaran sudah tersedia di ticket.\n" +
-            "⏳ Pembayaran akan terdeteksi otomatis.",
+            paymentNotice,
 
           embeds: [],
 
@@ -917,6 +1127,41 @@ async function handleInteraction(interaction: Interaction) {
         );
 
         // ========================================
+        // CLEANUP ORPHAN TICKET CHANNEL
+        // ========================================
+
+        if (ticketChannel && typeof ticketChannel.delete === "function") {
+          await ticketChannel
+            .delete("Gagal membuat QRIS pembayaran.")
+            .catch(() => {});
+        }
+
+        // ========================================
+        // CANCEL UNPAID ORDER IN DATABASE
+        // ========================================
+
+        if (createdOrderId) {
+          try {
+            await prisma.order.update({
+              where: { id: createdOrderId },
+              data: { status: "CANCELLED" },
+            });
+            await prisma.orderEvent.create({
+              data: {
+                orderId: createdOrderId,
+                eventType: "CANCELLED",
+                oldStatus: "CREATED",
+                newStatus: "CANCELLED",
+                description: "Order otomatis dibatalkan karena gagal membuat QRIS pembayaran.",
+              },
+            });
+            console.log(`🧹 Order ${createdOrderId} otomatis dibatalkan karena pembuatan QRIS gagal.`);
+          } catch (cancelErr) {
+            console.error(`⚠️ Gagal membatalkan order ${createdOrderId}:`, cancelErr);
+          }
+        }
+
+        // ========================================
         // REMOVE CACHE (CLEANUP ON FAILURE)
         // ========================================
 
@@ -928,11 +1173,15 @@ async function handleInteraction(interaction: Interaction) {
         // SHOW ERROR
         // ========================================
 
+        const errorMessage =
+          error instanceof Error
+            ? error.message
+            : "Terjadi kesalahan saat membuat order atau QRIS pembayaran.";
+
         await interaction.editReply({
           content:
-            "❌ **Gagal membuat order.**\n\n" +
-            "Terjadi kesalahan saat membuat order atau QRIS pembayaran.\n\n" +
-            "Silakan coba lagi atau hubungi admin.",
+            `❌ **Gagal membuat order.**\n\n${errorMessage}\n\n` +
+            "Silakan periksa kembali atau hubungi admin.",
 
           embeds: [],
 
@@ -1054,6 +1303,36 @@ async function handleInteraction(interaction: Interaction) {
     }
 
     // ==================================================
+    // CHECK PAYMENT BUTTON (CEK PEMBAYARAN INSTAN)
+    // ==================================================
+
+    if (interaction.customId.startsWith("check_payment_")) {
+      const orderId = Number(
+        interaction.customId.replace("check_payment_", ""),
+      );
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      try {
+        const res = await checkAndFulfillOrderPayment(orderId);
+        if (res.paid) {
+          await interaction.editReply({
+            content: `✅ **Pembayaran Berhasil Terverifikasi!**\n\nPesanan **${res.orderNumber ?? `#${orderId}`}** telah lunas. Robux sedang segera dikirimkan ke akun kamu!`,
+          });
+        } else {
+          await interaction.editReply({
+            content: `⏳ **Status Pembayaran:**\n\n${res.statusText}\n\n*Jika kamu baru saja scan QRIS, tunggu beberapa detik lalu klik tombol **Cek Pembayaran** kembali.*`,
+          });
+        }
+      } catch (err: any) {
+        await interaction.editReply({
+          content: `⚠️ Kendala saat memeriksa pembayaran: ${err?.message || "Silakan coba lagi beberapa saat lagi."}`,
+        });
+      }
+
+      return;
+    }
+
+    // ==================================================
     // SUPPORT BUTTON
     // ==================================================
 
@@ -1077,6 +1356,88 @@ async function handleInteraction(interaction: Interaction) {
     // CANCEL ORDER
     // ==================================================
 
+    // ==================================================
+    // RATING STARS (1 - 5 BINTANG)
+    // ==================================================
+
+    if (interaction.customId.startsWith("rate_")) {
+      const parts = interaction.customId.split("_");
+      const stars = Number(parts[1]);
+      const orderId = Number(parts[2]);
+
+      const modal = new ModalBuilder()
+        .setCustomId(`review_modal_${stars}_${orderId}`)
+        .setTitle(`Beri Rating ⭐ ${stars}/5`);
+
+      const reviewInput = new TextInputBuilder()
+        .setCustomId("review_text")
+        .setLabel("Ulasan (Opsional)")
+        .setPlaceholder("Tulis ulasan pengalamanmu (contoh: gacor / cepat)...")
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false)
+        .setMaxLength(500);
+
+      modal.addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(reviewInput),
+      );
+
+      await interaction.showModal(modal);
+      return;
+    }
+
+    // ==================================================
+    // CLOSE TICKET BUTTON
+    // ==================================================
+
+    if (interaction.customId.startsWith("close_ticket_")) {
+      const orderId = Number(interaction.customId.replace("close_ticket_", ""));
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      const order = await prisma.order.findUnique({
+        where: { id: orderId },
+        include: { user: true },
+      });
+
+      if (order) {
+        // Jika pembeli belum memberi rating, otomatis beri rating 5 bintang
+        if (!isOrderRated(order.user.discordUserId)) {
+          saveBuyerRating({
+            discordUserId: order.user.discordUserId,
+            discordUsername:
+              order.user.discordUsername || interaction.user.username,
+            stars: 5,
+            review: "",
+            method: "Robux",
+          });
+
+          await sendVouchEmbed({
+            client,
+            buyerUser: interaction.user,
+            orderNumber: order.orderNumber,
+            totalAmount: order.totalAmount,
+            robuxAmount: order.robuxAmount,
+            stars: 5,
+            review: "",
+          });
+        }
+      }
+
+      await interaction.editReply({
+        content:
+          "🔒 **Ticket Ditutup**\n\nTerima kasih telah berbelanja di Takemi Store! Tiket ini akan dihapus dalam 3 detik.",
+      });
+
+      setTimeout(async () => {
+        try {
+          if (interaction.channel && "delete" in interaction.channel) {
+            await interaction.channel.delete("Tiket ditutup oleh pengguna.");
+          }
+        } catch {}
+      }, 3000);
+
+      return;
+    }
+
     if (
       interaction.customId.startsWith(
         "cancel_order_",
@@ -1099,6 +1460,61 @@ async function handleInteraction(interaction: Interaction) {
   // ==================================================
 
   if (interaction.isModalSubmit()) {
+
+    // ==============================
+    // REVIEW / RATING MODAL
+    // ==============================
+
+    if (interaction.customId.startsWith("review_modal_")) {
+      const parts = interaction.customId.split("_");
+      const stars = Number(parts[2]);
+      const orderId = Number(parts[3]);
+      const reviewText =
+        interaction.fields.getTextInputValue("review_text")?.trim() || "";
+
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      // Simpan rating ke database.db
+      saveBuyerRating({
+        discordUserId: interaction.user.id,
+        discordUsername: interaction.user.username,
+        stars,
+        review: reviewText,
+        method: "Robux",
+      });
+
+      const order = await prisma.order.findUnique({
+        where: { id: orderId },
+      });
+
+      if (order) {
+        await sendVouchEmbed({
+          client,
+          buyerUser: interaction.user,
+          orderNumber: order.orderNumber,
+          totalAmount: order.totalAmount,
+          robuxAmount: order.robuxAmount,
+          stars,
+          review: reviewText,
+        });
+      }
+
+      await interaction.editReply({
+        content: `✅ Terima kasih atas rating **⭐ ${stars}/5** dan ulasanmu!\nTiket ini akan ditutup dalam 5 detik.`,
+      });
+
+      setTimeout(async () => {
+        try {
+          if (interaction.channel && "delete" in interaction.channel) {
+            await interaction.channel.delete(
+              "Tiket ditutup setelah ulasan diberikan.",
+            );
+          }
+        } catch {}
+      }, 5000);
+
+      return;
+    }
 
     // ==============================
     // CUSTOMER CANCEL MODAL
@@ -1198,13 +1614,41 @@ async function handleInteraction(interaction: Interaction) {
           await adminMarkCompleted(orderId, interaction.user.id, reason);
           content = `✅ Order #${orderId} ditandai selesai (manual).`;
         } else {
+          const ord = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: { ticket: true },
+          });
+          const wasPaid =
+            ord?.status !== "CREATED" &&
+            ord?.status !== "WAITING_PAYMENT" &&
+            ord?.status !== "PAYMENT_PENDING";
+
           await adminCancelOrder(orderId, interaction.user.id, reason);
-          content =
-            `↩️ Order #${orderId} dibatalkan.\n` +
-            "Lakukan refund manual ke customer, lalu simpan buktinya.";
+
+          content = wasPaid
+            ? `↩️ Order #${orderId} dibatalkan.\nLakukan refund manual ke customer, lalu simpan buktinya.`
+            : `↩️ Order #${orderId} dibatalkan.\nKarena order belum dibayar, refund tidak diperlukan.`;
+
+          if (ord?.ticket?.channelId) {
+            try {
+              const ch = await interaction.client.channels.fetch(
+                ord.ticket.channelId,
+              );
+              if (ch && "send" in ch) {
+                await (ch as any).send(
+                  `🔒 **Order #${orderId} telah dibatalkan oleh admin.**\nAlasan: ${reason}\nTiket ini akan ditutup dalam 5 detik.`,
+                );
+                setTimeout(() => {
+                  (ch as any).delete("Dibatalkan oleh admin").catch(() => {});
+                }, 5000);
+              }
+            } catch {}
+          }
         }
 
-        await interaction.editReply({ content });
+        await interaction.editReply({ content }).catch((err) => {
+          console.warn("⚠️ Gagal edit reply modal interaction:", err?.message || err);
+        });
       } catch (error) {
         console.error(
           `❌ Aksi admin ${action} gagal untuk order ${orderId}:`,
@@ -1244,20 +1688,37 @@ async function handleInteraction(interaction: Interaction) {
       // VALIDASI JUMLAH ROBUX
       // ==============================
 
-      if (
-        !Number.isInteger(amount) ||
-        amount < 100 ||
-        amount > 5000 ||
-        amount % 100 !== 0
-      ) {
+      if (!(await isValidRobuxAmount(amount))) {
+        const minRobux = await getMinRobuxAmount();
         await interaction.reply({
           content:
-            "❌ Jumlah Robux harus merupakan kelipatan **100 Robux** dan maksimal **5000 Robux**.\n\n" +
-            "Contoh yang valid: **100, 200, 500, 1000, 2500**.",
+            `❌ Jumlah Robux minimal adalah **${minRobux} Robux** dan maksimal **5000 Robux**.\n\n` +
+            `Contoh yang valid: **${minRobux}, 100, 250, 500, 1000, 2500**.`,
 
           flags: MessageFlags.Ephemeral,
         });
 
+        return;
+      }
+
+      // ==============================
+      // VALIDASI STOK / LIMIT SENDER
+      // ==============================
+
+      const stock = await getSenderStockStatus();
+      if (stock.allLimitReached) {
+        await interaction.reply({
+          content: "❌ Semua akun sender telah mencapai batas limit harian/bulanan. Pembelian ditutup sementara.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      if (stock.maxAvailableRobux < amount) {
+        await interaction.reply({
+          content: `❌ Stok Robux sender saat ini tidak mencukupi untuk order sebesar **${amount.toLocaleString("id-ID")} Robux** (Maksimum saat ini: **${stock.maxAvailableRobux.toLocaleString("id-ID")} Robux**).`,
+          flags: MessageFlags.Ephemeral,
+        });
         return;
       }
 
@@ -1458,6 +1919,8 @@ app.use(
   "/webhook",
   midtransWebhook,
 );
+
+app.use("/admin", adminDashboard);
 
 const PORT =
   Number(process.env.PORT) || 3000;

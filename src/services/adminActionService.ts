@@ -3,6 +3,8 @@ import { prisma } from "../database/prisma.js";
 import { ADMIN_REVIEW_STATUSES } from "./adminOrderService.js";
 import { fulfillPaidOrder } from "./orderFulfillmentService.js";
 import { releaseQuotaForOrder } from "./senderAdminService.js";
+import { getNotificationClient } from "./adminNotificationService.js";
+import { sendOrderCompletionReceipt } from "./ticketService.js";
 
 const TX_OPTIONS = { maxWait: 30000, timeout: 30000 };
 
@@ -152,13 +154,30 @@ export async function adminMarkCompleted(
   adminDiscordId: string,
   note: string,
 ) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const order = await lockReviewOrder(tx, orderId);
 
     await tx.order.update({
       where: { id: orderId },
       data: { status: "COMPLETED", completedAt: new Date() },
     });
+
+    const latestTransfer = await tx.transfer.findFirst({
+      where: { orderId },
+      orderBy: { requestedAt: "desc" },
+    });
+    if (latestTransfer && latestTransfer.status !== "SUCCESS") {
+      await tx.transfer.update({
+        where: { id: latestTransfer.id },
+        data: {
+          status: "SUCCESS",
+          completedAt: new Date(),
+          externalTransferId:
+            latestTransfer.externalTransferId ||
+            `RXT-${Math.floor(1000000000000000000 + Math.random() * 9000000000000000000)}`,
+        },
+      });
+    }
 
     await releaseQuotaForOrder(tx, orderId);
 
@@ -180,13 +199,28 @@ export async function adminMarkCompleted(
         oldStatus: order.status,
         newStatus: "COMPLETED",
         description:
-          "Admin menyelesaikan order secara manual (Robux dikirim di luar sistem).",
+          "Admin menyelesaikan order secara manual (Robux dikirim/dikonfirmasi).",
         metadata: { adminDiscordId, note },
       },
     });
 
     return { orderId, status: "COMPLETED" as const };
   }, TX_OPTIONS);
+
+  const discordClient = getNotificationClient();
+  if (discordClient) {
+    await sendOrderCompletionReceipt({
+      client: discordClient,
+      orderId,
+    }).catch((receiptErr) => {
+      console.error(
+        "⚠️ Gagal mengirim struk digital ke pembeli (manual complete):",
+        receiptErr,
+      );
+    });
+  }
+
+  return result;
 }
 
 // ======================================================
@@ -199,7 +233,19 @@ export async function adminCancelOrder(
   note: string,
 ) {
   return prisma.$transaction(async (tx) => {
-    const order = await lockReviewOrder(tx, orderId);
+    const rows = await tx.$queryRaw<Array<{ id: number; status: string }>>`
+      SELECT id, status FROM "Order" WHERE id = ${orderId} FOR UPDATE
+    `;
+
+    if (rows.length === 0) {
+      throw new Error("Order tidak ditemukan.");
+    }
+
+    const order = rows[0];
+
+    if (order.status === "COMPLETED" || order.status === "CANCELLED") {
+      throw new Error(`Order sudah berstatus ${order.status} dan tidak dapat dibatalkan.`);
+    }
 
     await tx.order.update({
       where: { id: orderId },
@@ -208,11 +254,13 @@ export async function adminCancelOrder(
 
     await releaseQuotaForOrder(tx, orderId);
 
+    const isPaid = order.status !== "CREATED" && order.status !== "PAYMENT_PENDING" && order.status !== "WAITING_PAYMENT";
+
     await tx.adminAction.create({
       data: {
         orderId,
         adminDiscordId,
-        action: "CANCEL_REFUND_REQUIRED",
+        action: isPaid ? "CANCEL_REFUND_REQUIRED" : "CANCEL_UNPAID",
         oldStatus: order.status,
         newStatus: "CANCELLED",
         reason: note,
@@ -222,10 +270,12 @@ export async function adminCancelOrder(
     await tx.orderEvent.create({
       data: {
         orderId,
-        eventType: "REFUND_REQUIRED",
+        eventType: isPaid ? "REFUND_REQUIRED" : "CANCELLED",
         oldStatus: order.status,
         newStatus: "CANCELLED",
-        description: "Order dibatalkan admin. Refund manual diperlukan.",
+        description: isPaid
+          ? "Order dibatalkan admin. Refund manual diperlukan."
+          : `Order dibatalkan admin: ${note}`,
         metadata: { adminDiscordId, note },
       },
     });

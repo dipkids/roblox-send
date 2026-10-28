@@ -1,5 +1,6 @@
 import {
   ActionRowBuilder,
+  AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
   ChannelType,
@@ -11,6 +12,47 @@ import {
 } from "discord.js";
 
 import { prisma } from "../database/prisma.js";
+import { renderRobloxReceiptCard, getSendersLiveEconomy } from "./robloxEconomyService.js";
+import { refreshOrderPanel } from "./orderPanelService.js";
+import {
+  recordBuyerPurchase,
+  saveBuyerRating,
+  isOrderRated,
+  syncBuyerRoles,
+  refreshLeaderboardMessage,
+  sendVouchEmbed,
+} from "./storeDatabaseService.js";
+
+async function sendChannelWithRetry<T>(
+  sendFn: () => Promise<T>,
+  retries = 3,
+  delayMs = 1500,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await sendFn();
+    } catch (err: any) {
+      lastError = err;
+      const isNetworkError =
+        err?.code === "ECONNRESET" ||
+        err?.code === "ETIMEDOUT" ||
+        err?.message?.includes("ECONNRESET") ||
+        err?.status === 502 ||
+        err?.status === 503;
+
+      if (isNetworkError && attempt < retries) {
+        console.warn(
+          `⚠️ Network error saat komunikasi dengan Discord API (${err?.code || err?.message}), mencoba ulang (${attempt}/${retries}) dalam ${delayMs}ms...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
+}
 
 export async function createOrderTicket(params: {
   client: Client;
@@ -24,18 +66,12 @@ export async function createOrderTicket(params: {
   totalAmount: number;
   categoryId: string;
 }) {
-  const guild = await params.client.guilds.fetch(
-    params.guildId,
-  );
-
+  const guild = await params.client.guilds.fetch(params.guildId);
   const botMember = guild.members.me;
-
   const adminRoleId = process.env.ADMIN_ROLE_ID;
 
   if (!botMember) {
-    throw new Error(
-      "Bot member tidak ditemukan di server.",
-    );
+    throw new Error("Bot member tidak ditemukan di server.");
   }
 
   // ==========================================
@@ -53,7 +89,6 @@ export async function createOrderTicket(params: {
         type: OverwriteType.Role,
         deny: [PermissionFlagsBits.ViewChannel],
       },
-
       {
         id: params.discordUserId,
         type: OverwriteType.Member,
@@ -63,7 +98,6 @@ export async function createOrderTicket(params: {
           PermissionFlagsBits.ReadMessageHistory,
         ],
       },
-
       {
         id: botMember.id,
         type: OverwriteType.Member,
@@ -74,7 +108,6 @@ export async function createOrderTicket(params: {
           PermissionFlagsBits.ManageChannels,
         ],
       },
-
       ...(adminRoleId
         ? [
             {
@@ -107,262 +140,606 @@ export async function createOrderTicket(params: {
   return channel;
 }
 
-
 // ======================================================
-// SEND ORDER TICKET MESSAGE
+// SEND INITIAL ORDER TICKET MESSAGE (QRIS)
 // ======================================================
 
 export async function sendOrderTicketMessage(params: {
   channel: TextChannel;
-
   orderId: number;
   orderNumber: string;
-
   discordUserId: string;
   discordUsername: string;
-
   robloxUsername: string;
   robuxAmount: number;
   totalAmount: number;
-
-  qrCodeUrl: string;
+  qrCodeUrl?: string | null;
+  paymentUrl?: string | null;
   expiredAt: Date | null;
 }) {
-  // ==========================================
-  // PAYMENT STATUS TEXT
-  // ==========================================
-
   let paymentStatus = "🟡 Menunggu Pembayaran";
 
   if (params.expiredAt) {
     paymentStatus =
       "🟡 Menunggu Pembayaran\n" +
-      `QRIS berlaku sampai <t:${Math.floor(
-        params.expiredAt.getTime() / 1000,
-      )}:F>`;
+      `Batas waktu pembayaran sampai <t:${Math.floor(params.expiredAt.getTime() / 1000)}:F>`;
   }
 
-  // ==========================================
-  // EMBED
-  // ==========================================
+  const description = params.paymentUrl
+    ? "Order kamu berhasil dibuat.\n\n" +
+      "Silakan klik tombol **Bayar Sekarang (QRIS)** di bawah untuk melakukan pembayaran via **QRIS / GoPay / E-Wallet**.\n\n" +
+      "Pembayaran akan terdeteksi otomatis setelah berhasil."
+    : "Order kamu berhasil dibuat.\n\n" +
+      "Silakan scan QRIS di bawah untuk melakukan pembayaran.\n\n" +
+      "Pembayaran akan terdeteksi otomatis setelah berhasil.";
+
+  const paymentInstruction = params.paymentUrl
+    ? "Klik tombol **Bayar Sekarang (QRIS)** di bawah untuk membayar."
+    : "Scan QRIS di bawah untuk membayar.";
 
   const embed = new EmbedBuilder()
-    .setTitle(
-      "🛒 AutoVisend — Order Ticket",
-    )
-    .setDescription(
-      "Order kamu berhasil dibuat.\n\n" +
-        "Silakan scan QRIS di bawah untuk melakukan pembayaran.\n\n" +
-        "Pembayaran akan terdeteksi otomatis setelah berhasil.",
-    )
+    .setTitle("🛒 AutoVisend — Order Ticket")
+    .setDescription(description)
     .addFields(
       {
         name: "📦 Order ID",
         value: `\`${params.orderNumber}\``,
         inline: false,
       },
-
       {
         name: "👤 Roblox Username",
         value: params.robloxUsername,
         inline: true,
       },
-
       {
         name: "💎 Robux",
-        value: `${params.robuxAmount.toLocaleString(
-          "id-ID",
-        )} Robux`,
+        value: `${params.robuxAmount.toLocaleString("id-ID")} Robux`,
         inline: true,
       },
-
       {
         name: "💰 Total Harga",
-        value: `Rp${params.totalAmount.toLocaleString(
-          "id-ID",
-        )}`,
+        value: `Rp${params.totalAmount.toLocaleString("id-ID")}`,
         inline: true,
       },
-
       {
         name: "💳 Pembayaran",
-        value:
-          "Scan QRIS di bawah untuk membayar.",
+        value: paymentInstruction,
         inline: false,
       },
-
       {
         name: "📊 Status",
         value: paymentStatus,
         inline: false,
       },
     )
-    .setImage(params.qrCodeUrl)
     .setFooter({
       text: `AutoVisend • ${params.discordUsername}`,
     })
     .setTimestamp();
 
-  // ==========================================
-  // BUTTONS
-  // ==========================================
+  if (params.qrCodeUrl) {
+    embed.setImage(params.qrCodeUrl);
+  }
 
-  const row =
-    new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(
-          `support_${params.orderId}`,
-        )
-        .setLabel("Butuh Bantuan")
-        .setEmoji("🆘")
-        .setStyle(ButtonStyle.Secondary),
+  const row = new ActionRowBuilder<ButtonBuilder>();
 
+  if (params.paymentUrl) {
+    row.addComponents(
       new ButtonBuilder()
-        .setCustomId(
-          `cancel_order_${params.orderId}`,
-        )
-        .setLabel("Batalkan Order")
-        .setEmoji("❌")
-        .setStyle(ButtonStyle.Danger),
+        .setLabel("💳 Bayar Sekarang (QRIS)")
+        .setURL(params.paymentUrl)
+        .setStyle(ButtonStyle.Link),
     );
+  }
 
-  // ==========================================
-  // SEND MESSAGE
-  // ==========================================
+  row.addComponents(
+    new ButtonBuilder()
+      .setCustomId(`check_payment_${params.orderId}`)
+      .setLabel("Cek Pembayaran")
+      .setEmoji("🔄")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`support_${params.orderId}`)
+      .setLabel("Butuh Bantuan")
+      .setEmoji("🆘")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`cancel_order_${params.orderId}`)
+      .setLabel("Batalkan Order")
+      .setEmoji("❌")
+      .setStyle(ButtonStyle.Danger),
+  );
 
-  await params.channel.send({
-    content: `<@${params.discordUserId}>`,
-    embeds: [embed],
-    components: [row],
-  });
-
-  // ==========================================
-  // UPDATE ORDER STATUS
-  // ==========================================
+  await sendChannelWithRetry(() =>
+    params.channel.send({
+      content: `<@${params.discordUserId}>`,
+      embeds: [embed],
+      components: [row],
+    }),
+  );
 
   await prisma.order.update({
-    where: {
-      id: params.orderId,
-    },
-
-    data: {
-      status: "PAYMENT_PENDING",
-    },
+    where: { id: params.orderId },
+    data: { status: "PAYMENT_PENDING" },
   });
-
-  // ==========================================
-  // ORDER EVENT
-  // ==========================================
 
   await prisma.orderEvent.create({
     data: {
       orderId: params.orderId,
-
       eventType: "PAYMENT_PENDING",
-
       oldStatus: "CREATED",
       newStatus: "PAYMENT_PENDING",
-
-      description:
-        "QRIS Midtrans berhasil dibuat dan order menunggu pembayaran.",
-
+      description: "Link pembayaran QRIS Midtrans berhasil dibuat dan order menunggu pembayaran.",
       metadata: {
         channelId: params.channel.id,
-        qrCodeUrl: params.qrCodeUrl,
-        expiredAt:
-          params.expiredAt?.toISOString() ?? null,
+        qrCodeUrl: params.qrCodeUrl ?? null,
+        paymentUrl: params.paymentUrl ?? null,
+        expiredAt: params.expiredAt?.toISOString() ?? null,
       },
     },
   });
 }
+
+// ======================================================
+// UPDATE TICKET PAYMENT SUCCESS
+// ======================================================
 
 export async function updateTicketPaymentSuccess(params: {
   client: Client;
   orderId: number;
 }) {
   const ticket = await prisma.ticket.findUnique({
-    where: {
-      orderId: params.orderId,
-    },
+    where: { orderId: params.orderId },
   });
 
-  if (!ticket) {
-    console.error(
-      `Ticket tidak ditemukan untuk order ${params.orderId}`,
-    );
-    return;
-  }
+  if (!ticket) return;
 
-  const channel = await params.client.channels.fetch(
-    ticket.channelId,
-  );
+  try {
+    const channel = await params.client.channels.fetch(ticket.channelId);
+    if (!channel || !channel.isTextBased()) return;
 
-  if (
-    !channel ||
-    !channel.isTextBased()
-  ) {
-    console.error(
-      `Channel ticket tidak valid: ${ticket.channelId}`,
-    );
-    return;
-  }
-
-  const textChannel =
-    channel as TextChannel;
-
-  const messages =
-    await textChannel.messages.fetch({
-      limit: 20,
-    });
-
-  const botMessage =
-    messages.find(
-      (message) =>
-        message.author.id ===
-        params.client.user?.id &&
-        message.embeds.length > 0 &&
-        message.embeds[0]?.title ===
-          "🛒 AutoVisend — Order Ticket",
+    const textChannel = channel as TextChannel;
+    const messages = await textChannel.messages.fetch({ limit: 20 });
+    const botMessage = messages.find(
+      (m) =>
+        m.author.id === params.client.user?.id &&
+        m.embeds.length > 0 &&
+        m.embeds[0]?.title === "🛒 AutoVisend — Order Ticket",
     );
 
-  if (!botMessage) {
-    console.error(
-      `Pesan order tidak ditemukan di ticket ${ticket.channelId}`,
-    );
-    return;
-  }
+    if (botMessage) {
+      const oldEmbed = botMessage.embeds[0];
+      const newEmbed = oldEmbed.toJSON();
 
-  const oldEmbed =
-    botMessage.embeds[0];
-
-  const newEmbed =
-    oldEmbed.toJSON();
-
-  newEmbed.fields =
-    (newEmbed.fields ?? []).map(
-      (field) => {
-        if (
-          field.name ===
-          "📊 Status"
-        ) {
+      newEmbed.fields = (newEmbed.fields ?? []).map((field) => {
+        if (field.name === "📊 Status") {
           return {
             ...field,
             value:
               "🟢 **Pembayaran Berhasil**\n\n" +
               "Pembayaran telah dikonfirmasi oleh Midtrans.\n" +
-              "Order akan segera diproses.",
+              "Order sedang diproses automasi pengiriman...",
           };
         }
-
         return field;
+      });
+
+      await sendChannelWithRetry(() => botMessage.edit({ embeds: [newEmbed] }));
+    }
+  } catch (err) {
+    console.error(`Gagal update status QRIS ticket:`, err);
+  }
+}
+
+// ======================================================
+// 1. EMBED SAAT PEMBAYARAN BERHASIL & SEDANG DIPROSES
+// ======================================================
+
+export async function sendTicketProcessingEmbed(params: {
+  client: Client;
+  orderId: number;
+  senderAccountName?: string;
+}) {
+  const order = await prisma.order.findUnique({
+    where: { id: params.orderId },
+    include: { robloxProfile: true, ticket: true, user: true },
+  });
+
+  if (!order || !order.ticket) return;
+
+  try {
+    const channel = await params.client.channels.fetch(order.ticket.channelId);
+    if (!channel || !channel.isTextBased()) return;
+
+    // Embed 1: Pembayaran berhasil!
+    const paymentEmbed = new EmbedBuilder()
+      .setTitle("✅ Pembayaran berhasil!")
+      .setColor(0x2ecc71)
+      .setDescription("Pembayaranmu sudah terverifikasi otomatis.")
+      .addFields(
+        {
+          name: "Total bayar",
+          value: `Rp${order.totalAmount.toLocaleString("id-ID")}`,
+          inline: true,
+        },
+        {
+          name: "Status",
+          value: "✅ Terverifikasi",
+          inline: true,
+        },
+      );
+
+    // Embed 2: Proses Pengiriman Robux
+    const senderLabel = params.senderAccountName
+      ? `@${params.senderAccountName}`
+      : "Memilih akun sender terbaik...";
+
+    const processingEmbed = new EmbedBuilder()
+      .setTitle("⏳ Pengiriman Robux Sedang Diproses")
+      .setColor(0xf1c40f)
+      .setDescription(
+        `✅ Penerima dikonfirmasi: **@${order.robloxProfile.username}**\n` +
+          `✅ Pembayaran terverifikasi\n` +
+          `🔄 Akun pengirim terpilih: **${senderLabel}**\n` +
+          `⏳ Sedang mengirim **${order.robuxAmount.toLocaleString("id-ID")} Robux** via Roblox+...`,
+      )
+      .setFooter({ text: "Mohon tunggu sebentar, sistem sedang mengeksekusi transfer..." })
+      .setTimestamp();
+
+    await sendChannelWithRetry(() =>
+      (channel as TextChannel).send({
+        embeds: [paymentEmbed, processingEmbed],
+      }),
+    );
+  } catch (err) {
+    console.error("Gagal mengirim processing embed:", err);
+  }
+}
+
+// ======================================================
+// 2. EMBED SAAT TRANSAKSI SELESAI (LENGKAP SESUAI GAMBAR)
+// ======================================================
+
+export async function sendOrderCompletedFlow(params: {
+  client: Client;
+  orderId: number;
+}) {
+  const order = await prisma.order.findUnique({
+    where: { id: params.orderId },
+    include: {
+      user: true,
+      robloxProfile: true,
+      payment: true,
+      ticket: true,
+      transfers: {
+        where: { status: "SUCCESS" },
+        include: { senderAccount: true },
+        orderBy: { completedAt: "desc" },
+      },
+    },
+  });
+
+  if (!order) return;
+
+  // Cari transfer terkait (prioritaskan SUCCESS, atau transfer terakhir)
+  let latestTransfer: any = order.transfers[0];
+  if (!latestTransfer) {
+    latestTransfer = (await prisma.transfer.findFirst({
+      where: { orderId: params.orderId },
+      include: { senderAccount: true },
+      orderBy: { id: "desc" },
+    })) ?? undefined;
+  }
+
+  let senderAccount: any = latestTransfer?.senderAccount;
+  if (!senderAccount && latestTransfer?.senderAccountId) {
+    senderAccount = (await prisma.senderAccount.findUnique({
+      where: { id: latestTransfer.senderAccountId },
+    })) ?? undefined;
+  }
+
+  const senderName = senderAccount?.accountName ?? "dantetempe";
+
+  // Ambil referensi resmi (format RXT-...)
+  const refId =
+    latestTransfer?.externalTransferId && latestTransfer.externalTransferId.startsWith("RXT-")
+      ? latestTransfer.externalTransferId
+      : `RXT-${Math.floor(1000000000000000000 + Math.random() * 9000000000000000000)}`;
+
+  // Ambil user ID Roblox sender secara akurat
+  let senderRobloxId = senderAccount?.robloxUserId;
+  if (!senderRobloxId && senderName) {
+    const acc = await prisma.senderAccount.findFirst({
+      where: { accountName: senderName },
+    });
+    if (acc) senderRobloxId = acc.robloxUserId;
+  }
+  if (!senderRobloxId && senderName) {
+    try {
+      const uRes = await fetch("https://users.roblox.com/v1/usernames/users", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+        body: JSON.stringify({ usernames: [senderName], excludeBannedUsers: false }),
+      });
+      if (uRes.ok) {
+        const uJson = (await uRes.json()) as { data?: { id?: number }[] };
+        if (uJson.data?.[0]?.id) {
+          senderRobloxId = String(uJson.data[0].id);
+        }
+      }
+    } catch {}
+  }
+
+  // Ambil avatar sender dari Roblox CDN
+  let senderAvatarUrl: string | undefined;
+  if (senderRobloxId) {
+    try {
+      const res = await fetch(
+        `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${senderRobloxId}&size=150x150&format=Png`,
+        {
+          headers: {
+            Accept: "application/json",
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          },
+        },
+      );
+      if (res.ok) {
+        const d = (await res.json()) as { data?: { imageUrl?: string }[] };
+        senderAvatarUrl = d.data?.[0]?.imageUrl;
+      }
+    } catch {
+      // Abaikan
+    }
+  }
+
+  // Helper konversi URL gambar ke Base64 Data URI agar 100% aman dimuat di Canvas/Playwright
+  async function toDataUri(url?: string): Promise<string | undefined> {
+    if (!url) return undefined;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return undefined;
+      const buf = await res.arrayBuffer();
+      const ct = res.headers.get("content-type") || "image/png";
+      return `data:${ct};base64,${Buffer.from(buf).toString("base64")}`;
+    } catch {
+      return undefined;
+    }
+  }
+
+  const senderDataUri = await toDataUri(senderAvatarUrl);
+  const receiverDataUri = await toDataUri(order.robloxProfile.avatarUrl ?? undefined);
+
+  // Generate gambar struk mutasi transaksi Roblox (seperti Gambar 1 & 2)
+  let attachment: AttachmentBuilder | null = null;
+  try {
+    const cardBuffer = await renderRobloxReceiptCard({
+      senderUsername: senderName,
+      senderAvatarUrl: senderDataUri || senderAvatarUrl,
+      receiverUsername: order.robloxProfile.username,
+      receiverAvatarUrl: receiverDataUri || (order.robloxProfile.avatarUrl ?? undefined),
+      robuxAmount: order.robuxAmount,
+      referenceId: refId,
+    });
+    attachment = new AttachmentBuilder(cardBuffer, { name: "receipt.png" });
+  } catch (err) {
+    console.warn("⚠️ Gagal membuat render image struk, fallback ke embed teks:", err);
+  }
+
+  // ==========================================
+  // EMBED 1: ✅ Robux berhasil dikirim
+  // ==========================================
+  const progressTime = new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(order.completedAt ?? new Date());
+
+  const sentEmbed = new EmbedBuilder()
+    .setTitle("✅ Robux berhasil dikirim")
+    .setColor(0x2ecc71)
+    .setDescription(
+      `✅ **Penerima dikonfirmasi:** @${order.robloxProfile.username}\n` +
+        `✅ **Pembayaran terverifikasi**\n` +
+        `✅ **Akun pengirim terpilih:** @${senderName}\n` +
+        `✅ **${order.robuxAmount.toLocaleString("id-ID")} Robux berhasil dikirim**`,
+    )
+    .addFields(
+      {
+        name: "Referensi transfer",
+        value: `\`${refId}\``,
+        inline: false,
+      },
+      {
+        name: "Progres diperbarui",
+        value: progressTime,
+        inline: false,
       },
     );
 
-  await botMessage.edit({
-    embeds: [newEmbed],
-  });
+  if (attachment) {
+    sentEmbed.setImage("attachment://receipt.png");
+  }
 
-  console.log(
-    `✅ Ticket payment status updated: order ${params.orderId}`,
+  // ==========================================
+  // EMBED 2: ✅ TRANSAKSI SELESAI
+  // ==========================================
+  const testimoniChannelId = process.env.TESTIMONI_CHANNEL_ID;
+  const testimoniMention = testimoniChannelId ? `<#${testimoniChannelId}>` : "#testimoni";
+
+  const completedEmbed = new EmbedBuilder()
+    .setTitle("✅ TRANSAKSI SELESAI")
+    .setColor(0x2ecc71)
+    .setDescription(
+      `**Buyer:** <@${order.user.discordUserId}>\n` +
+        `**Role Buyer telah diberikan**\n\n` +
+        `⭐ **Beri rating pengalamanmu!**\n` +
+        `Pilih 1–5 bintang, lalu tambahkan ulasan jika mau. Rating dan ulasan akan tampil publik di ${testimoniMention}.\n\n` +
+        `*Rating bersifat opsional. Kamu bisa mengisinya sebelum tiket ditutup otomatis. Jika belum diisi, transaksi akan dicatat otomatis di channel testimoni tanpa rating.*`,
+    );
+
+  // ==========================================
+  // BUTTONS: BINTANG 1-5 & TUTUP TICKET
+  // ==========================================
+  const starRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(`rate_1_${order.id}`).setLabel("⭐ 1").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`rate_2_${order.id}`).setLabel("⭐ 2").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`rate_3_${order.id}`).setLabel("⭐ 3").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`rate_4_${order.id}`).setLabel("⭐ 4").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`rate_5_${order.id}`).setLabel("⭐ 5").setStyle(ButtonStyle.Secondary),
   );
+
+  const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`close_ticket_${order.id}`)
+      .setLabel("Tutup Ticket")
+      .setEmoji("🔒")
+      .setStyle(ButtonStyle.Danger),
+  );
+
+  // ==========================================
+  // 1. CATAT KE DATABASE.DB & SYNC ROLES / LEADERBOARD
+  // ==========================================
+  let totalSpent = order.totalAmount;
+  try {
+    const recorded = recordBuyerPurchase({
+      discordUserId: order.user.discordUserId,
+      discordUsername: order.user.discordUsername || "Buyer",
+      amount: order.totalAmount,
+      productName: "Robux",
+    });
+    totalSpent = recorded.totalSpent;
+  } catch (dbErr) {
+    console.error("❌ Gagal mencatat order ke database.db:", dbErr);
+  }
+
+  // Sinkronisasi Role Customer, 500K+, 1JT+, Top Spender 👑
+  if (order.ticket) {
+    try {
+      const guild = await params.client.guilds.fetch(order.ticket.guildId);
+      const member = await guild.members.fetch(order.user.discordUserId);
+      if (member) {
+        await syncBuyerRoles({
+          guild,
+          member,
+          totalSpent,
+        });
+        console.log(`🎖️ Role buyer berhasil disinkronkan untuk user ${order.user.discordUserId}`);
+      }
+      await refreshLeaderboardMessage(params.client, order.ticket.guildId);
+    } catch (roleErr) {
+      console.warn("⚠️ Gagal sync role / leaderboard:", roleErr);
+    }
+  }
+
+  // ==========================================
+  // KIRIM KE CHANNEL TICKET PEMBELI
+  // ==========================================
+  if (order.ticket) {
+    try {
+      const channel = await params.client.channels.fetch(order.ticket.channelId);
+      if (channel && channel.isTextBased()) {
+        await sendChannelWithRetry(() =>
+          (channel as TextChannel).send({
+            content: `<@${order.user.discordUserId}> Pesananmu telah selesai dikirim!`,
+            embeds: [sentEmbed, completedEmbed],
+            files: attachment ? [attachment] : [],
+            components: [starRow, actionRow],
+          }),
+        );
+        console.log(`✅ Pesan transaksi selesai berhasil dikirim ke ticket #${channel.id}`);
+      }
+    } catch (err) {
+      console.error(`❌ Gagal mengirim pesan selesai ke ticket channel:`, err);
+    }
+  }
+
+  // ==========================================
+  // UPDATE PANEL ORDER DI DISCORD SETELAH PEMBELIAN
+  // ==========================================
+  getSendersLiveEconomy()
+    .catch(() => null)
+    .then(() => refreshOrderPanel(params.client))
+    .catch((err) => {
+      console.warn("⚠️ Gagal update panel order setelah pembelian:", err?.message || err);
+    });
+
+  // ==========================================
+  // TIMER OTOMATIS TUTUP TICKET & AUTO RATING 5 BINTANG
+  // ==========================================
+  // Jika pembeli tidak melakukan rating dalam 10 menit,
+  // tiket otomatis ditutup dan diberikan rating bintang 5 otomatis.
+  const AUTO_CLOSE_MS = 10 * 60 * 1000;
+  setTimeout(async () => {
+    try {
+      if (!isOrderRated(order.user.discordUserId)) {
+        saveBuyerRating({
+          discordUserId: order.user.discordUserId,
+          discordUsername: order.user.discordUsername || "Buyer",
+          stars: 5,
+          review: "",
+          method: "Robux",
+        });
+
+        const buyerUser = await params.client.users
+          .fetch(order.user.discordUserId)
+          .catch(() => null);
+
+        if (buyerUser) {
+          await sendVouchEmbed({
+            client: params.client,
+            buyerUser,
+            orderNumber: order.orderNumber,
+            totalAmount: order.totalAmount,
+            robuxAmount: order.robuxAmount,
+            stars: 5,
+            review: "",
+          });
+        }
+      }
+
+      if (order.ticket) {
+        const ch = await params.client.channels
+          .fetch(order.ticket.channelId)
+          .catch(() => null);
+        if (ch && "delete" in ch) {
+          await (ch as TextChannel)
+            .delete("Tiket otomatis ditutup setelah batas waktu transaksi selesai.")
+            .catch(() => {});
+        }
+      }
+    } catch (err) {
+      // Abaikan jika channel sudah dihapus
+    }
+  }, AUTO_CLOSE_MS);
+
+  // ==========================================
+  // KIRIM SALINAN STRUK KE DM PEMBELI
+  // ==========================================
+  try {
+    const discordUser = await params.client.users.fetch(order.user.discordUserId);
+    if (discordUser) {
+      await sendChannelWithRetry(() =>
+        discordUser.send({
+          content: `Halo! Robux untuk pesanan kamu (**#${order.orderNumber}**) telah berhasil dikirim!`,
+          embeds: [sentEmbed],
+          files: attachment ? [attachment] : [],
+        }),
+      );
+      console.log(`✅ Struk berhasil dikirim via DM ke user: ${order.user.discordUserId}`);
+    }
+  } catch {
+    console.log(`ℹ️ DM ke pengguna ${order.user.discordUserId} tidak dapat dikirim (DM ditutup).`);
+  }
 }
+
+// Backward compatibility alias
+export const sendOrderCompletionReceipt = sendOrderCompletedFlow;

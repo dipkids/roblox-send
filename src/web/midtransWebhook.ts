@@ -259,7 +259,7 @@ export interface NotificationResult {
 
 export async function processMidtransNotification(
   notification: MidtransNotification | undefined,
-  source: "WEBHOOK" | "RECONCILE" = "WEBHOOK",
+  source: "WEBHOOK" | "RECONCILE" | "MANUAL_CHECK" = "WEBHOOK",
 ): Promise<NotificationResult> {
   if (!notification || typeof notification !== "object") {
     return {

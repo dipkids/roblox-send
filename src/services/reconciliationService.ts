@@ -9,19 +9,17 @@ type StatusBody = NonNullable<
   Parameters<typeof processMidtransNotification>[0]
 >;
 
-// Beri waktu webhook normal sebelum worker ikut memeriksa.
-const PENDING_STALE_MINUTES = 3;
 const PENDING_BATCH = 10;
-
 const CUSTOMER_WAIT_HOURS = Number(process.env.CUSTOMER_WAIT_HOURS ?? 12);
 
 let running = false;
+let fastReconcileRunning = false;
 
 // ======================================================
 // STATUS MIDTRANS
 // ======================================================
 
-async function fetchMidtransStatus(
+export async function fetchMidtransStatus(
   midtransOrderId: string,
 ): Promise<{ ok: true; body: StatusBody } | { ok: false; reason: string }> {
   try {
@@ -65,54 +63,142 @@ async function fetchMidtransStatus(
 }
 
 // ======================================================
-// REKONSILIASI PEMBAYARAN
+// REKONSILIASI PEMBAYARAN CEPAT (POLLING REAL-TIME)
 // ======================================================
 
 export async function reconcilePayments() {
-  const cutoff = new Date(Date.now() - PENDING_STALE_MINUTES * 60_000);
+  if (fastReconcileRunning) return;
+  fastReconcileRunning = true;
 
-  const payments = await prisma.payment.findMany({
-    where: {
-      status: "PENDING",
-      createdAt: { lt: cutoff },
-      order: {
-        status: { in: ["CREATED", "WAITING_PAYMENT", "PAYMENT_PENDING"] },
+  try {
+    const payments = await prisma.payment.findMany({
+      where: {
+        status: "PENDING",
+        order: {
+          status: { in: ["CREATED", "WAITING_PAYMENT", "PAYMENT_PENDING"] },
+        },
       },
-    },
-    orderBy: { createdAt: "asc" },
-    take: PENDING_BATCH,
+      orderBy: { createdAt: "desc" },
+      take: PENDING_BATCH,
+    });
+
+    if (payments.length === 0) return;
+
+    for (const payment of payments) {
+      const status = await fetchMidtransStatus(payment.midtransOrderId);
+
+      if (!status.ok) {
+        continue;
+      }
+
+      // Jika belum dibayar (masih pending), lanjutkan ke transaksi berikutnya
+      if (status.body.transaction_status === "pending") {
+        continue;
+      }
+
+      const result = await processMidtransNotification(status.body, "RECONCILE");
+
+      if (result.httpStatus !== 200) {
+        continue;
+      }
+
+      if (result.body.message === "OK") {
+        console.log(
+          `⚡ Pembayaran terdeteksi cepat: ${payment.midtransOrderId} ` +
+            `(${status.body.transaction_status}) → order ${result.body.orderStatus}`,
+        );
+      }
+
+      if (result.postWork) {
+        await result.postWork();
+      }
+    }
+  } catch (err) {
+    // Abaikan error polling transien
+  } finally {
+    fastReconcileRunning = false;
+  }
+}
+
+// ======================================================
+// CEK PEMBAYARAN MANUAL (TOMBOL DISCORD)
+// ======================================================
+
+export async function checkAndFulfillOrderPayment(orderId: number): Promise<{
+  paid: boolean;
+  statusText: string;
+  orderNumber?: string;
+}> {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: { payment: true },
   });
 
-  for (const payment of payments) {
-    const status = await fetchMidtransStatus(payment.midtransOrderId);
+  if (!order) {
+    return { paid: false, statusText: "Order tidak ditemukan." };
+  }
 
-    if (!status.ok) {
-      console.log(
-        `ℹ️ Rekonsiliasi ${payment.midtransOrderId}: ${status.reason}`,
-      );
-      continue;
-    }
+  if (
+    [
+      "PAID",
+      "CHECKING_SENDER",
+      "READY_TO_SEND",
+      "PROCESSING",
+      "VERIFYING",
+      "COMPLETED",
+    ].includes(order.status)
+  ) {
+    return {
+      paid: true,
+      statusText: "Pembayaran sudah terverifikasi dan pesanan sedang/telah diproses.",
+      orderNumber: order.orderNumber,
+    };
+  }
 
-    const result = await processMidtransNotification(status.body, "RECONCILE");
+  if (order.status === "CANCELLED") {
+    return { paid: false, statusText: "Order ini sudah dibatalkan." };
+  }
 
-    if (result.httpStatus !== 200) {
-      console.warn(
-        `⚠️ Rekonsiliasi ${payment.midtransOrderId} ditolak (HTTP ${result.httpStatus}).`,
-      );
-      continue;
-    }
+  if (!order.payment) {
+    return { paid: false, statusText: "Data pembayaran belum dibuat." };
+  }
 
-    if (result.body.message === "OK") {
-      console.log(
-        `🔁 Rekonsiliasi ${payment.midtransOrderId}: ` +
-          `${status.body.transaction_status} → order ${result.body.orderStatus}`,
-      );
-    }
+  const status = await fetchMidtransStatus(order.payment.midtransOrderId);
+  if (!status.ok) {
+    return {
+      paid: false,
+      statusText:
+        status.reason === "belum ada di Midtrans (404)"
+          ? "Menunggu pembayaran dilakukan oleh pembeli..."
+          : `Status: ${status.reason}`,
+      orderNumber: order.orderNumber,
+    };
+  }
 
+  const isPaid =
+    status.body.transaction_status === "settlement" ||
+    status.body.transaction_status === "capture";
+
+  if (isPaid) {
+    const result = await processMidtransNotification(
+      status.body,
+      "MANUAL_CHECK",
+    );
     if (result.postWork) {
       await result.postWork();
     }
+    return {
+      paid: true,
+      statusText: "✅ Pembayaran berhasil terdeteksi! Robux sedang diproses.",
+      orderNumber: order.orderNumber,
+    };
   }
+
+  return {
+    paid: false,
+    statusText: `Pembayaran belum diterima (Status: ${status.body.transaction_status || "pending"}). Silakan selesaikan pembayaran terlebih dahulu di aplikasi Anda.`,
+    orderNumber: order.orderNumber,
+  };
 }
 
 // ======================================================
@@ -242,7 +328,6 @@ async function runStep(name: string, fn: () => Promise<void>) {
 
 export async function runBackgroundWorkers() {
   if (running) {
-    console.log("⏭️ Worker masih berjalan. Skip cycle ini.");
     return;
   }
 

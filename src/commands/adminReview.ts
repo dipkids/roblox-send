@@ -8,24 +8,54 @@ import {
 } from "discord.js";
 
 import {
+  AdminReviewFilter,
   getManualReviewOrders,
 } from "../services/adminOrderService.js";
 
 export const data = new SlashCommandBuilder()
   .setName("admin_review")
-  .setDescription(
-    "Melihat order yang membutuhkan pemeriksaan admin",
+  .setDescription("Melihat order yang membutuhkan pemeriksaan admin")
+  .addStringOption((option) =>
+    option
+      .setName("filter")
+      .setDescription("Pilih status order yang ingin dilihat")
+      .setRequired(false)
+      .addChoices(
+        {
+          name: "Perlu Tindakan Admin (Gagal Transfer/Limit) [Default]",
+          value: "review",
+        },
+        {
+          name: "Belum Dibayar (Pending/Unpaid QRIS)",
+          value: "unpaid",
+        },
+        {
+          name: "Semua Order Terbaru",
+          value: "all",
+        },
+      ),
   );
 
-export async function execute(
-  interaction: ChatInputCommandInteraction,
-) {
-  const orders = await getManualReviewOrders();
+export async function execute(interaction: ChatInputCommandInteraction) {
+  const filter =
+    (interaction.options.getString("filter") as AdminReviewFilter) || "review";
+
+  const orders = await getManualReviewOrders(filter);
+
+  let title = "🔎 AutoVisend — Manual Review";
+  let emptyMsg = "✅ Tidak ada order yang sedang membutuhkan pemeriksaan manual.";
+
+  if (filter === "unpaid") {
+    title = "⏳ AutoVisend — Order Belum Dibayar (Pending)";
+    emptyMsg = "✅ Tidak ada order yang sedang menunggu pembayaran.";
+  } else if (filter === "all") {
+    title = "📋 AutoVisend — Semua Order Terbaru";
+    emptyMsg = "Belum ada riwayat order di database.";
+  }
 
   if (orders.length === 0) {
     await interaction.editReply({
-      content:
-        "✅ Tidak ada order yang sedang membutuhkan pemeriksaan manual.",
+      content: emptyMsg,
       embeds: [],
       components: [],
     });
@@ -34,11 +64,9 @@ export async function execute(
   }
 
   const embed = new EmbedBuilder()
-    .setTitle("🔎 AutoVisend — Manual Review")
-    .setDescription(
-      "Pilih order untuk melihat detail dan riwayat transfer.",
-    )
-    .setColor(0xF1C40F);
+    .setTitle(title)
+    .setDescription("Pilih order untuk melihat detail atau mengambil tindakan.")
+    .setColor(filter === "unpaid" ? 0x3498db : 0xf1c40f);
 
   for (const order of orders) {
     const latestTransfer = order.transfers[0];
@@ -46,12 +74,12 @@ export async function execute(
     embed.addFields({
       name: `${order.orderNumber} · ID ${order.id}`,
       value: [
-        `**Status:** ${order.status}`,
+        `**Status:** \`${order.status}\``,
+        `**Buyer:** <@${order.user.discordUserId}> (${order.user.discordUsername ?? "Unknown"})`,
         `**Robux:** ${order.robuxAmount.toLocaleString("id-ID")}`,
         `**Total:** Rp${order.totalAmount.toLocaleString("id-ID")}`,
         `**Penerima:** ${order.robloxProfile.username}`,
         `**Transfer terakhir:** ${latestTransfer?.status ?? "Belum ada"}`,
-        `**Percobaan:** ${latestTransfer?.attemptCount ?? 0}`,
       ].join("\n"),
     });
   }

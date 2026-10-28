@@ -99,6 +99,65 @@ export async function findAvailableSender(
   return null;
 }
 
+
+export async function getSenderStockStatus(): Promise<{
+  hasActiveSenders: boolean;
+  allLimitReached: boolean;
+  maxAvailableRobux: number;
+  totalRemainingRobux: number;
+}> {
+  const senders = await prisma.senderAccount.findMany({
+    where: {
+      status: "ACTIVE",
+    },
+  });
+
+  if (senders.length === 0) {
+    return {
+      hasActiveSenders: false,
+      allLimitReached: true,
+      maxAvailableRobux: 0,
+      totalRemainingRobux: 0,
+    };
+  }
+
+  const now = new Date();
+  let maxAvailable = 0;
+  let totalRemaining = 0;
+  let anyAvailable = false;
+
+  for (const sender of senders) {
+    let dailyUsed = sender.dailyUsed;
+    let monthlyUsed = sender.monthlyUsed;
+
+    if (sender.dailyResetAt && now >= sender.dailyResetAt) {
+      dailyUsed = 0;
+    }
+    if (sender.monthlyResetAt && now >= sender.monthlyResetAt) {
+      monthlyUsed = 0;
+    }
+
+    const dailyRemaining = Math.max(0, sender.dailyLimit - dailyUsed);
+    const monthlyRemaining = Math.max(0, sender.monthlyLimit - monthlyUsed);
+    const available = Math.min(dailyRemaining, monthlyRemaining);
+
+    if (available > 0) {
+      anyAvailable = true;
+    }
+    if (available > maxAvailable) {
+      maxAvailable = available;
+    }
+    totalRemaining += available;
+  }
+
+  return {
+    hasActiveSenders: true,
+    allLimitReached: !anyAvailable,
+    maxAvailableRobux: maxAvailable,
+    totalRemainingRobux: totalRemaining,
+  };
+}
+
 export async function checkSenderForOrder(
   orderId: number,
 ) {

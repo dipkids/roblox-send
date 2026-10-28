@@ -1,4 +1,5 @@
 import { prisma } from "../database/prisma.js";
+import { getMinRobuxAmount } from "./minOrderService.js";
 
 function generateOrderNumber(): string {
   const timestamp = Date.now();
@@ -7,20 +8,18 @@ function generateOrderNumber(): string {
   return `AV-${timestamp}-${random}`;
 }
 
-const MIN_ROBUX = 100;
-const MAX_ROBUX = 5000;
-const ROBUX_STEP = 100;
+export const MAX_ROBUX = 5000;
 const MAX_OPEN_ORDERS = 2;
 
 // Error yang pesannya aman ditampilkan ke customer.
 export class OrderValidationError extends Error {}
 
-export function isValidRobuxAmount(amount: number): boolean {
+export async function isValidRobuxAmount(amount: number): Promise<boolean> {
+  const minRobux = await getMinRobuxAmount();
   return (
     Number.isInteger(amount) &&
-    amount >= MIN_ROBUX &&
-    amount <= MAX_ROBUX &&
-    amount % ROBUX_STEP === 0
+    amount >= minRobux &&
+    amount <= MAX_ROBUX 
   );
 }
 
@@ -35,8 +34,11 @@ export async function createOrder(params: {
   rate: number;
 }) {
 
-  if (!isValidRobuxAmount(params.robuxAmount)) {
-    throw new OrderValidationError("Jumlah Robux tidak valid.");
+  if (!(await isValidRobuxAmount(params.robuxAmount))) {
+    const minRobux = await getMinRobuxAmount();
+    throw new OrderValidationError(
+      `Jumlah Robux tidak valid. Minimal ${minRobux} Robux dan maksimal ${MAX_ROBUX} Robux.`,
+    );
   }
 
   if (!Number.isInteger(params.rate) || params.rate <= 0) {
@@ -68,6 +70,45 @@ export async function createOrder(params: {
 
       // Kunci baris user supaya klik ganda tidak lolos dari batas.
       await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${user.id} FOR UPDATE`;
+
+      // 1. Bersihkan order CREATED yang tersangkut tanpa pembayaran (> 3 menit)
+      const threeMinutesAgo = new Date(Date.now() - 3 * 60 * 1000);
+      await tx.order.updateMany({
+        where: {
+          userId: user.id,
+          status: "CREATED",
+          createdAt: { lt: threeMinutesAgo },
+        },
+        data: {
+          status: "CANCELLED",
+        },
+      });
+
+      // 2. Bersihkan order PAYMENT_PENDING yang QRIS-nya sudah kedaluwarsa
+      const now = new Date();
+      const expiredPayments = await tx.payment.findMany({
+        where: {
+          order: {
+            userId: user.id,
+            status: "PAYMENT_PENDING",
+          },
+          status: "PENDING",
+          expiredAt: { lt: now },
+        },
+        select: { orderId: true },
+      });
+
+      if (expiredPayments.length > 0) {
+        const expiredOrderIds = expiredPayments.map((p) => p.orderId);
+        await tx.order.updateMany({
+          where: { id: { in: expiredOrderIds } },
+          data: { status: "PAYMENT_TIMEOUT" },
+        });
+        await tx.payment.updateMany({
+          where: { orderId: { in: expiredOrderIds } },
+          data: { status: "EXPIRED" },
+        });
+      }
 
       const openOrders = await tx.order.count({
         where: {

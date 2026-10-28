@@ -1,8 +1,12 @@
-node_modules/
-dist/
+/node_modules/
+/dist/
 .env
 .env.*
 !.env.example
+
+# SSH Keys
+*.pem
+*.key
 
 # Temporary browser profiles & test outputs
 .browser-profile/
@@ -17,3 +21,7 @@ database.db*
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Pastikan dist RoValra tetap di-track untuk Playwright di VPS
+!rovalra/RoValra/dist/
+!rovalra/RoValra/dist/**

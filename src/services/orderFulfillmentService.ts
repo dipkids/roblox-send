@@ -1,7 +1,7 @@
 import { prisma } from "../database/prisma.js";
 import { reserveSenderForOrder } from "./transferService.js";
 import { startTransfer } from "./transferExecutor.js";
-import { executeTransfer } from "./robloxTransferService.js";
+import { executeTransfer, isRobloxBrowserBusy } from "./robloxTransferService.js";
 import { sendOrderCompletionReceipt, sendTicketProcessingEmbed } from "./ticketService.js";
 import { verifyTransfer } from "./transferVerificationService.js";
 import { notifyAdminOrder, getNotificationClient } from "./adminNotificationService.js";
@@ -556,6 +556,7 @@ async function runFulfillment(orderId: number, origin: FailureOrigin) {
         client: discordClientStart,
         orderId,
         senderAccountName: senderAcc?.accountName,
+        isQueued: isRobloxBrowserBusy(),
       }).catch((err) => console.error("Gagal kirim processing embed:", err));
     }
 

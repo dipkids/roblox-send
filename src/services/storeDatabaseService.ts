@@ -221,18 +221,19 @@ export async function syncBuyerRoles(params: {
     }
   }
 
-  // Update Top Spender Role 👑 (Rank 1 di database)
+  // Update Top Spender Role 👑 (Rank 1 di database, minimal spending Rp500.000)
   if (topSpenderRole) {
     try {
+      const minTopSpender = Number(process.env.MIN_TOP_SPENDER_AMOUNT || 500_000);
       const db = getDb();
       const topBuyer = db
         .prepare(
-          "SELECT CAST(user_id AS TEXT) AS user_id FROM buyers ORDER BY total_spent DESC LIMIT 1",
+          "SELECT CAST(user_id AS TEXT) AS user_id, total_spent FROM buyers ORDER BY total_spent DESC LIMIT 1",
         )
-        .get() as { user_id: string } | undefined;
+        .get() as { user_id: string; total_spent: number } | undefined;
       db.close();
 
-      if (topBuyer) {
+      if (topBuyer && topBuyer.total_spent >= minTopSpender) {
         const topUserId = topBuyer.user_id;
         const role = guild.roles.cache.get(topSpenderRole);
         if (role) {

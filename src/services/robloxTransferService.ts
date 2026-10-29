@@ -3,6 +3,8 @@ import path from "node:path";
 import fs from "node:fs";
 import { chromium, type BrowserContext } from "playwright";
 import { prisma } from "../database/prisma.js";
+import { sendTicketTurnArrivedEmbed } from "./ticketService.js";
+import { getNotificationClient } from "./adminNotificationService.js";
 
 interface MockTransferOptions {
   simulateFailure?: boolean;
@@ -19,6 +21,10 @@ interface TransferExecutionResult {
 // Mutex sederhana agar automasi browser akun Roblox tidak berjalan secara bersamaan
 let isBrowserBusy = false;
 
+export function isRobloxBrowserBusy(): boolean {
+  return isBrowserBusy;
+}
+
 // ============================================================
 // REAL ROBLOX+ / ROVALRA PLAYWRIGHT TRANSFER
 // ============================================================
@@ -26,10 +32,32 @@ let isBrowserBusy = false;
 export async function executeRobloxPlusTransfer(
   transferId: number,
 ): Promise<any> {
+  let waitedInQueue = false;
+  if (isBrowserBusy) {
+    waitedInQueue = true;
+    console.log(`⏳ Transfer ${transferId} mengantre menunggu browser Playwright selesai...`);
+  }
   while (isBrowserBusy) {
     await new Promise((resolve) => setTimeout(resolve, 1500));
   }
   isBrowserBusy = true;
+
+  if (waitedInQueue) {
+    console.log(`🚀 Giliran tiba untuk Transfer ${transferId}! Memulai Playwright transfer...`);
+    try {
+      const notifClient = getNotificationClient();
+      const tr = await prisma.transfer.findUnique({
+        where: { id: transferId },
+        select: { orderId: true },
+      });
+      if (notifClient && tr?.orderId) {
+        await sendTicketTurnArrivedEmbed({
+          client: notifClient,
+          orderId: tr.orderId,
+        }).catch(() => {});
+      }
+    } catch {}
+  }
 
   try {
     const transfer = await prisma.transfer.findUnique({

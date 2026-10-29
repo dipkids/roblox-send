@@ -339,6 +339,7 @@ export async function sendTicketProcessingEmbed(params: {
   client: Client;
   orderId: number;
   senderAccountName?: string;
+  isQueued?: boolean;
 }) {
   const order = await prisma.order.findUnique({
     where: { id: params.orderId },
@@ -369,21 +370,31 @@ export async function sendTicketProcessingEmbed(params: {
         },
       );
 
-    // Embed 2: Proses Pengiriman Robux
+    // Embed 2: Status Pengiriman Robux
     const senderLabel = params.senderAccountName
       ? `@${params.senderAccountName}`
       : "Memilih akun sender terbaik...";
 
     const processingEmbed = new EmbedBuilder()
-      .setTitle("⏳ Pengiriman Robux Sedang Diproses")
-      .setColor(0xf1c40f)
+      .setTitle(
+        params.isQueued
+          ? "⏳ Pembayaran Diterima — Dalam Antrean"
+          : "⏳ Pengiriman Robux Sedang Diproses",
+      )
+      .setColor(params.isQueued ? 0xe67e22 : 0xf1c40f)
       .setDescription(
         `✅ Penerima dikonfirmasi: **@${order.robloxProfile.username}**\n` +
           `✅ Pembayaran terverifikasi\n` +
           `🔄 Akun pengirim terpilih: **${senderLabel}**\n` +
-          `⏳ Sedang mengirim **${order.robuxAmount.toLocaleString("id-ID")} Robux**...`,
+          (params.isQueued
+            ? `⏳ Orderan kamu berada dalam **antrean pengiriman**. Mohon tunggu sebentar, sistem sedang menyelesaikan pengiriman order sebelumnya dan akan langsung mengirim orderanmu begitu giliran tiba!`
+            : `⏳ Sedang mengirim **${order.robuxAmount.toLocaleString("id-ID")} Robux**...`),
       )
-      .setFooter({ text: "Mohon tunggu sebentar, sistem sedang mengeksekusi transfer..." })
+      .setFooter({
+        text: params.isQueued
+          ? "Antrean otomatis: Mohon jangan tutup tiket, transfer akan segera berjalan..."
+          : "Mohon tunggu sebentar, sistem sedang mengeksekusi transfer...",
+      })
       .setTimestamp();
 
     await sendChannelWithRetry(() =>
@@ -393,6 +404,31 @@ export async function sendTicketProcessingEmbed(params: {
     );
   } catch (err) {
     console.error("Gagal mengirim processing embed:", err);
+  }
+}
+
+export async function sendTicketTurnArrivedEmbed(params: {
+  client: Client;
+  orderId: number;
+}) {
+  const order = await prisma.order.findUnique({
+    where: { id: params.orderId },
+    include: { ticket: true, user: true },
+  });
+
+  if (!order || !order.ticket) return;
+
+  try {
+    const channel = await params.client.channels.fetch(order.ticket.channelId);
+    if (!channel || !channel.isTextBased()) return;
+
+    await sendChannelWithRetry(() =>
+      (channel as TextChannel).send({
+        content: `🚀 <@${order.user.discordUserId}> **Giliran orderan kamu tiba!** Sistem automasi sedang membuka profil Roblox dan mengeksekusi pengiriman Robux...`,
+      }),
+    );
+  } catch (err) {
+    console.warn("⚠️ Gagal mengirim notifikasi giliran tiba:", err);
   }
 }
 

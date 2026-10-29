@@ -166,6 +166,7 @@ const robloxProfileCache = new Map<
   string,
   CachedRobloxProfile
 >();
+const orderCreationLocks = new Set<string>();
 
 function getProfileCacheKey(
   discordUserId: string,
@@ -875,13 +876,21 @@ async function handleInteraction(interaction: Interaction) {
       // GET PROFILE FROM CACHE
       // ==========================================
 
+      if (orderCreationLocks.has(interaction.user.id)) {
+        await interaction.reply({
+          content: "⏳ Order kamu sedang dibuat, mohon tunggu sebentar...",
+          flags: MessageFlags.Ephemeral,
+        }).catch(() => {});
+        return;
+      }
+
       const profile =
         robloxProfileCache.get(cacheKey);
 
       if (!profile) {
         await interaction.reply({
           content:
-            "❌ **Session Roblox sudah tidak tersedia.**\n\n" +
+            "❌ **Session Roblox sudah tidak tersedia atau order sudah dibuat.**\n\n" +
             "Silakan ulangi order dari `/order`.",
 
           flags: MessageFlags.Ephemeral,
@@ -889,6 +898,10 @@ async function handleInteraction(interaction: Interaction) {
 
         return;
       }
+
+      // Hapus cache segera & pasang lock user untuk mencegah tiket duplikat akibat double-click
+      robloxProfileCache.delete(cacheKey);
+      orderCreationLocks.add(interaction.user.id);
 
       // ==========================================
       // ACKNOWLEDGE BUTTON
@@ -1187,6 +1200,8 @@ async function handleInteraction(interaction: Interaction) {
 
           components: [],
         });
+      } finally {
+        orderCreationLocks.delete(interaction.user.id);
       }
 
       return;

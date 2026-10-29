@@ -1,5 +1,5 @@
 import { prisma } from "../database/prisma.js";
-import { executeMockTransfer } from "./robloxTransferService.js";
+import { executeTransfer } from "./robloxTransferService.js";
 import { verifyTransfer } from "./transferVerificationService.js";
 import { notifyAdminOrder, kindFromErrorCode } from "./adminNotificationService.js";
 
@@ -360,7 +360,7 @@ export async function retryFailedTransfer(
   const simulateMockFailure =
     process.env.MOCK_TRANSFER_FAIL === "true";
 
-  const result = await executeMockTransfer(
+  const result = await executeTransfer(
     retryingTransfer.id,
     simulateMockFailure
       ? {

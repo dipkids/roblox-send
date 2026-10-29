@@ -14,6 +14,7 @@ import {
 } from "./adminNotificationService.js";
 import { releaseQuotaForOrder } from "./senderAdminService.js";
 import { retryFailedTransfer } from "./transferRetryService.js";
+import { sendOrderCompletionReceipt } from "./ticketService.js";
 
 const TX_OPTIONS = { maxWait: 30000, timeout: 30000 };
 
@@ -377,18 +378,31 @@ export async function customerRetryAfter2FA(
   const result = await retryFailedTransfer(orderId);
 
   if (result.success) {
-    const order = await prisma.order.findUnique({
-      where: { id: orderId },
-      include: { user: true, robloxProfile: true },
-    });
-
-    if (order) {
-      await sendToTicket(orderId, {
-        content:
-          `✅ <@${order.user.discordUserId}> **${order.robuxAmount.toLocaleString("id-ID")} Robux** ` +
-          `berhasil dikirim ke akun **${order.robloxProfile.username}**. Terima kasih!`,
-        mentionUserId: order.user.discordUserId,
+    const discordClient = getNotificationClient();
+    if (discordClient) {
+      await sendOrderCompletionReceipt({
+        client: discordClient,
+        orderId,
+      }).catch((receiptErr) => {
+        console.error(
+          "⚠️ Gagal mengirim struk digital ke pembeli setelah retry 2FA:",
+          receiptErr,
+        );
       });
+    } else {
+      const order = await prisma.order.findUnique({
+        where: { id: orderId },
+        include: { user: true, robloxProfile: true },
+      });
+
+      if (order) {
+        await sendToTicket(orderId, {
+          content:
+            `✅ <@${order.user.discordUserId}> **${order.robuxAmount.toLocaleString("id-ID")} Robux** ` +
+            `berhasil dikirim ke akun **${order.robloxProfile.username}**. Terima kasih!`,
+          mentionUserId: order.user.discordUserId,
+        });
+      }
     }
 
     return { success: true as const };

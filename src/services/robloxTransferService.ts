@@ -325,6 +325,9 @@ export async function executeRobloxPlusTransfer(
       await sendBtn.waitFor({ state: "visible", timeout: 15000 });
 
       // Monitor respon API transfer Roblox secara langsung dari jaringan browser
+      let apiResponseJson: any = null;
+      let apiResponseStatus: number | null = null;
+
       const apiResponsePromise = page
         .waitForResponse(
           (res) =>
@@ -332,6 +335,13 @@ export async function executeRobloxPlusTransfer(
             res.request().method() === "POST",
           { timeout: 25000 },
         )
+        .then(async (res) => {
+          apiResponseStatus = res.status();
+          try {
+            apiResponseJson = await res.json();
+          } catch {}
+          return res;
+        })
         .catch(() => null);
 
       // Jeda sebelum klik Send agar transaksi aman & rate limit check selesai
@@ -430,22 +440,37 @@ export async function executeRobloxPlusTransfer(
             "Akun penerima membutuhkan persetujuan orang tua (Parent Consent Recourse).",
         };
       } else {
+        await errorNoticeLocator
+          .waitFor({ state: "visible", timeout: 4000 })
+          .catch(() => {});
+        const domErrorText = (
+          (await errorNoticeLocator.textContent().catch(() => null)) ?? ""
+        ).trim();
+        const apiErrorText =
+          apiResponseJson?.errorMessage || apiResponseJson?.failureReason;
         const errorText =
-          (await errorNoticeLocator.textContent()) ?? "Unknown transfer error";
-        console.warn(`⚠️ Error notifikasi Roblox+: ${errorText}`);
+          domErrorText || apiErrorText || "Unknown transfer error";
+        console.warn(
+          `⚠️ Error notifikasi Roblox+: ${errorText} (API Status: ${apiResponseStatus})`,
+        );
 
         let classifiedCode = "TRANSFER_FAILED";
-        const lower = errorText.toLowerCase();
+        const combined =
+          `${errorText} ${apiResponseJson?.failureReason ?? ""} ${apiResponseJson?.errorMessage ?? ""}`.toLowerCase();
 
         if (
-          lower.includes("limit") ||
-          lower.includes("2-step") ||
-          lower.includes("verification")
+          combined.includes("limit") ||
+          combined.includes("2-step") ||
+          combined.includes("twostep") ||
+          combined.includes("verification") ||
+          combined.includes("2fa") ||
+          combined.includes("parent")
         ) {
           classifiedCode = "RECEIVER_LIMIT";
         } else if (
-          lower.includes("not enough") ||
-          lower.includes("balance")
+          combined.includes("not enough") ||
+          combined.includes("balance") ||
+          combined.includes("sender")
         ) {
           classifiedCode = "INSUFFICIENT_FUNDS";
         }
@@ -458,25 +483,50 @@ export async function executeRobloxPlusTransfer(
       }
     } catch (browserError) {
       console.error("❌ Terjadi kegagalan automasi browser:", browserError);
+      let detectedErrorCode = "AUTOMATION_BROWSER_ERROR";
+      let detectedErrorMessage =
+        browserError instanceof Error
+          ? browserError.message
+          : String(browserError);
+
       if (context) {
         try {
           const pages = context.pages();
           if (pages.length > 0) {
-            await pages[0].screenshot({
+            const page0 = pages[0];
+            await page0.screenshot({
               path: `transfer-error-${transfer.id}.png`,
               fullPage: true,
             });
             console.log(`📸 Screenshot browser error tersimpan di transfer-error-${transfer.id}.png`);
+
+            const noticeText = (
+              await page0
+                .locator(".rovalra-sendrobux-mutednotice.error")
+                .first()
+                .textContent()
+                .catch(() => null)
+            )?.trim();
+
+            if (noticeText) {
+              const lowerNotice = noticeText.toLowerCase();
+              if (
+                lowerNotice.includes("limit") ||
+                lowerNotice.includes("2-step") ||
+                lowerNotice.includes("verification") ||
+                lowerNotice.includes("2fa")
+              ) {
+                detectedErrorCode = "RECEIVER_LIMIT";
+                detectedErrorMessage = noticeText;
+              }
+            }
           }
         } catch {}
       }
       transferResult = {
         success: false,
-        errorCode: "AUTOMATION_BROWSER_ERROR",
-        errorMessage:
-          browserError instanceof Error
-            ? browserError.message
-            : String(browserError),
+        errorCode: detectedErrorCode,
+        errorMessage: detectedErrorMessage,
       };
     } finally {
       if (context) {

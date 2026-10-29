@@ -24,14 +24,23 @@ export type AdminNotifyKind =
 
 // Kode error transfer yang berarti limit AKUN PENERIMA.
 // Samakan dengan errorCode dari transfer Roblox asli nanti.
-const RECEIVER_LIMIT_ERROR_CODES = ["RECEIVER_LIMIT", "MOCK_RECEIVER_LIMIT"];
+const RECEIVER_LIMIT_ERROR_CODES = [
+  "RECEIVER_LIMIT",
+  "MOCK_RECEIVER_LIMIT",
+  "PARENT_CONSENT_REQUIRED",
+  "RECEIVER_2FA_REQUIRED",
+];
+
+const SENDER_LIMIT_ERROR_CODES = ["SENDER_LIMIT", "INSUFFICIENT_FUNDS"];
 
 export function kindFromErrorCode(
   errorCode?: string | null,
 ): AdminNotifyKind {
-  return errorCode && RECEIVER_LIMIT_ERROR_CODES.includes(errorCode)
-    ? "RECEIVER_LIMIT"
-    : "MANUAL_REVIEW";
+  if (errorCode && RECEIVER_LIMIT_ERROR_CODES.includes(errorCode)) return "RECEIVER_LIMIT";
+  if (errorCode && SENDER_LIMIT_ERROR_CODES.includes(errorCode)) return "SENDER_LIMIT";
+  return "MANUAL_REVIEW";
+
+
 }
 
 const TITLES: Record<AdminNotifyKind, string> = {

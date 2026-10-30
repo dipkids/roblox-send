@@ -1408,32 +1408,36 @@ async function handleInteraction(interaction: Interaction) {
       const orderId = Number(interaction.customId.replace("close_ticket_", ""));
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-      const order = await prisma.order.findUnique({
-        where: { id: orderId },
-        include: { user: true },
-      });
+      const triggerBotDone = process.env.TRIGGER_BOT_DONE !== "false";
 
-      if (order) {
-        // Jika pembeli belum memberi rating, otomatis beri rating 5 bintang
-        if (!isOrderRated(order.user.discordUserId)) {
-          saveBuyerRating({
-            discordUserId: order.user.discordUserId,
-            discordUsername:
-              order.user.discordUsername || interaction.user.username,
-            stars: 5,
-            review: "",
-            method: "Robux",
-          });
+      if (!triggerBotDone) {
+        const order = await prisma.order.findUnique({
+          where: { id: orderId },
+          include: { user: true },
+        });
 
-          await sendVouchEmbed({
-            client,
-            buyerUser: interaction.user,
-            orderNumber: order.orderNumber,
-            totalAmount: order.totalAmount,
-            robuxAmount: order.robuxAmount,
-            stars: 5,
-            review: "",
-          });
+        if (order) {
+          // Jika pembeli belum memberi rating, otomatis beri rating 5 bintang
+          if (!isOrderRated(order.user.discordUserId)) {
+            saveBuyerRating({
+              discordUserId: order.user.discordUserId,
+              discordUsername:
+                order.user.discordUsername || interaction.user.username,
+              stars: 5,
+              review: "",
+              method: "Robux",
+            });
+
+            await sendVouchEmbed({
+              client,
+              buyerUser: interaction.user,
+              orderNumber: order.orderNumber,
+              totalAmount: order.totalAmount,
+              robuxAmount: order.robuxAmount,
+              stars: 5,
+              review: "",
+            });
+          }
         }
       }
 

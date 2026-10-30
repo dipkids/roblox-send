@@ -82,6 +82,7 @@ export async function createOrderTicket(params: {
     name: `order-${params.orderNumber.toLowerCase()}`,
     type: ChannelType.GuildText,
     parent: params.categoryId,
+    topic: `Order #${params.orderNumber} | Robux`,
 
     permissionOverwrites: [
       {
@@ -642,38 +643,40 @@ export async function sendOrderCompletedFlow(params: {
       .setStyle(ButtonStyle.Danger),
   );
 
-  // ==========================================
-  // 1. CATAT KE DATABASE.DB & SYNC ROLES / LEADERBOARD
-  // ==========================================
-  let totalSpent = order.totalAmount;
-  try {
-    const recorded = recordBuyerPurchase({
-      discordUserId: order.user.discordUserId,
-      discordUsername: order.user.discordUsername || "Buyer",
-      amount: order.totalAmount,
-      productName: "Robux",
-    });
-    totalSpent = recorded.totalSpent;
-  } catch (dbErr) {
-    console.error("❌ Gagal mencatat order ke database.db:", dbErr);
-  }
+  const triggerBotDone = process.env.TRIGGER_BOT_DONE !== "false";
 
-  // Sinkronisasi Role Customer, 500K+, 1JT+, Top Spender 👑
-  if (order.ticket) {
+  if (!triggerBotDone) {
+    // 1. CATAT KE DATABASE.DB & SYNC ROLES / LEADERBOARD (MODE LOKAL)
+    let totalSpent = order.totalAmount;
     try {
-      const guild = await params.client.guilds.fetch(order.ticket.guildId);
-      const member = await guild.members.fetch(order.user.discordUserId);
-      if (member) {
-        await syncBuyerRoles({
-          guild,
-          member,
-          totalSpent,
-        });
-        console.log(`🎖️ Role buyer berhasil disinkronkan untuk user ${order.user.discordUserId}`);
+      const recorded = recordBuyerPurchase({
+        discordUserId: order.user.discordUserId,
+        discordUsername: order.user.discordUsername || "Buyer",
+        amount: order.totalAmount,
+        productName: "Robux",
+      });
+      totalSpent = recorded.totalSpent;
+    } catch (dbErr) {
+      console.error("❌ Gagal mencatat order ke database.db:", dbErr);
+    }
+
+    // Sinkronisasi Role Customer, 500K+, 1JT+, Top Spender 👑
+    if (order.ticket) {
+      try {
+        const guild = await params.client.guilds.fetch(order.ticket.guildId);
+        const member = await guild.members.fetch(order.user.discordUserId);
+        if (member) {
+          await syncBuyerRoles({
+            guild,
+            member,
+            totalSpent,
+          });
+          console.log(`🎖️ Role buyer berhasil disinkronkan untuk user ${order.user.discordUserId}`);
+        }
+        await refreshLeaderboardMessage(params.client, order.ticket.guildId);
+      } catch (roleErr) {
+        console.warn("⚠️ Gagal sync role / leaderboard:", roleErr);
       }
-      await refreshLeaderboardMessage(params.client, order.ticket.guildId);
-    } catch (roleErr) {
-      console.warn("⚠️ Gagal sync role / leaderboard:", roleErr);
     }
   }
 
@@ -722,8 +725,34 @@ export async function sendOrderCompletedFlow(params: {
           console.warn("⚠️ Gagal mengedit pesan processing sebelumnya:", fetchErr);
         }
 
-        // Kirim pesan penyelesaian dengan ping ke pembeli dan tombol rating
-        if (editedExistingMessage) {
+        if (!editedExistingMessage) {
+          // Fallback jika pesan sebelumnya tidak ditemukan
+          await sendChannelWithRetry(() =>
+            textChannel.send({
+              embeds: [sentEmbed],
+              files: attachment ? [attachment] : [],
+            }),
+          );
+        }
+
+        if (triggerBotDone) {
+          // Pemicu .done ke Bot 1 (storesystem.py)
+          console.log(`🚀 Mengirim trigger .done ke Bot 1 untuk order ${order.orderNumber}...`);
+          await sendChannelWithRetry(() =>
+            textChannel.send({
+              content: `.done <@${order.user.discordUserId}> ${order.totalAmount}`,
+            }),
+          );
+
+          // Berikan tombol tutup tiket ke pembeli
+          await sendChannelWithRetry(() =>
+            textChannel.send({
+              content: `<@${order.user.discordUserId}> Pesananmu telah berhasil diproses! Terima kasih telah berbelanja di Takemi Store.`,
+              components: [actionRow],
+            }),
+          );
+        } else {
+          // Fallback tanpa Bot 1 (menggunakan embed dan bintang internal)
           await sendChannelWithRetry(() =>
             textChannel.send({
               content: `<@${order.user.discordUserId}> Pesananmu telah selesai dikirim!`,
@@ -731,17 +760,8 @@ export async function sendOrderCompletedFlow(params: {
               components: [starRow, actionRow],
             }),
           );
-        } else {
-          // Fallback jika pesan sebelumnya tidak ditemukan
-          await sendChannelWithRetry(() =>
-            textChannel.send({
-              content: `<@${order.user.discordUserId}> Pesananmu telah selesai dikirim!`,
-              embeds: [sentEmbed, completedEmbed],
-              files: attachment ? [attachment] : [],
-              components: [starRow, actionRow],
-            }),
-          );
         }
+
         console.log(`✅ Pesan transaksi selesai berhasil dikirim ke ticket #${channel.id}`);
       }
     } catch (err) {
@@ -767,7 +787,7 @@ export async function sendOrderCompletedFlow(params: {
   const AUTO_CLOSE_MS = 10 * 60 * 1000;
   setTimeout(async () => {
     try {
-      if (!isOrderRated(order.user.discordUserId)) {
+      if (!triggerBotDone && !isOrderRated(order.user.discordUserId)) {
         saveBuyerRating({
           discordUserId: order.user.discordUserId,
           discordUsername: order.user.discordUsername || "Buyer",

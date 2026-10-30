@@ -10,7 +10,8 @@
     "register": "tsx src/register-commands.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "db:clean": "tsx scripts/cleanOrders.ts"
   },
   "keywords": [],
   "author": "",

@@ -23,6 +23,7 @@ import {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  TextChannel,
 } from "discord.js";
 
 import {
@@ -49,7 +50,11 @@ import { getMinRobuxAmount } from "./services/minOrderService.js";
 import { isCustomOrderEnabled } from "./services/customOrderSettingService.js";
 import { getSenderStockStatus } from "./services/senderService.js";
 import { OrderValidationError, createOrder, isValidRobuxAmount, } from "./services/orderService.js";
-import { createOrderTicket, sendOrderTicketMessage } from "./services/ticketService.js";
+import {
+  cancelOrderAndCloseTicket,
+  createOrderTicket,
+  sendOrderTicketMessage,
+} from "./services/ticketService.js";
 import { createDynamicQris } from "./services/paymentService.js";
 import { checkSenderForOrder } from "./services/senderService.js";
 import { recoverPendingOrders } from "./services/orderRecoveryService.js";
@@ -210,7 +215,7 @@ client.once("ready", async () => {
   }, 5_000);
 
   setInterval(() => {
-    runBackgroundWorkers().catch((error) => {
+    runBackgroundWorkers(client).catch((error) => {
       console.error(
         "❌ Worker error:",
         error instanceof Error ? error.message : error,
@@ -1499,18 +1504,61 @@ async function handleInteraction(interaction: Interaction) {
     }
 
     if (
-      interaction.customId.startsWith(
-        "cancel_order_",
-      )
+      interaction.customId.startsWith("admin_close_ticket_") ||
+      interaction.customId.startsWith("cancel_order_")
     ) {
+      const orderId = Number(
+        interaction.customId
+          .replace("admin_close_ticket_", "")
+          .replace("cancel_order_", ""),
+      );
+
+      // Cek apakah pengguna memiliki akses Admin
+      if (!hasAdminRole(interaction)) {
+        await interaction.reply({
+          content:
+            "❌ **Akses Khusus Admin**\n\n" +
+            "Hanya **Admin / Staff** yang memiliki izin untuk menutup tiket ini secara manual sebelum pembayaran selesai.\n\n" +
+            "Jika kamu adalah pembeli dan ingin membatalkan pesanan, cukup tinggalkan room ini — tiket akan tertutup otomatis setelah batas waktu 15 menit habis.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
       await interaction.reply({
         content:
-          "❌ **Pembatalan Order**\n\n" +
-          "Fitur pembatalan order akan diproses pada tahap berikutnya.",
-
+          "🔒 **Menutup Tiket...**\n\n" +
+          `Tiket sedang ditutup oleh Admin <@${interaction.user.id}>. Channel akan dihapus dalam 3 detik.`,
         flags: MessageFlags.Ephemeral,
       });
 
+      try {
+        await cancelOrderAndCloseTicket({
+          orderId,
+          closedBy: interaction.user.tag,
+          reason: `Ditutup manual oleh Admin ${interaction.user.tag}`,
+        });
+      } catch (err) {
+        console.warn("⚠️ Gagal membatalkan order di DB saat admin close ticket:", err);
+      }
+
+      if (interaction.channel && "send" in interaction.channel) {
+        await (interaction.channel as TextChannel)
+          .send({
+            content: `🔒 **Tiket Ditutup oleh Admin**\n\nTiket ini telah ditutup secara manual oleh <@${interaction.user.id}>. Channel akan dihapus dalam 3 detik...`,
+          })
+          .catch(() => {});
+      }
+
+      setTimeout(async () => {
+        try {
+          if (interaction.channel && "delete" in interaction.channel) {
+            await interaction.channel.delete(`Ditutup oleh Admin ${interaction.user.tag}`);
+          }
+        } catch {}
+      }, 3000);
+
+      refreshOrderPanel(client).catch(() => {});
       return;
     }
   }

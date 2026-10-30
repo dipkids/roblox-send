@@ -14,6 +14,7 @@ import {
 import { prisma } from "../database/prisma.js";
 import { renderRobloxReceiptCard, getSendersLiveEconomy } from "./robloxEconomyService.js";
 import { refreshOrderPanel } from "./orderPanelService.js";
+import { releaseQuotaForOrder } from "./senderAdminService.js";
 import {
   recordBuyerPurchase,
   saveBuyerRating,
@@ -245,9 +246,9 @@ export async function sendOrderTicketMessage(params: {
       .setEmoji("🆘")
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
-      .setCustomId(`cancel_order_${params.orderId}`)
-      .setLabel("Batalkan Order")
-      .setEmoji("❌")
+      .setCustomId(`admin_close_ticket_${params.orderId}`)
+      .setLabel("Tutup Ticket")
+      .setEmoji("🔒")
       .setStyle(ButtonStyle.Danger),
   );
 
@@ -278,6 +279,151 @@ export async function sendOrderTicketMessage(params: {
         expiredAt: params.expiredAt?.toISOString() ?? null,
       },
     },
+  });
+
+  // ==========================================
+  // IN-MEMORY TIMERS: PERINGATAN (13m) & AUTO-CLOSE (15m)
+  // ==========================================
+  const orderId = params.orderId;
+  const channelId = params.channel.id;
+  const discordUserId = params.discordUserId;
+  const orderNumber = params.orderNumber;
+  const client = params.channel.client;
+
+  // 1. Peringatan di menit ke-13 (2 menit sebelum hangus)
+  setTimeout(async () => {
+    try {
+      const currentOrder = await prisma.order.findUnique({
+        where: { id: orderId },
+        select: { status: true },
+      });
+      if (
+        currentOrder &&
+        ["CREATED", "WAITING_PAYMENT", "PAYMENT_PENDING"].includes(currentOrder.status)
+      ) {
+        const ch = await client.channels.fetch(channelId).catch(() => null);
+        if (ch && ch.isTextBased()) {
+          await (ch as TextChannel).send({
+            content: `⚠️ <@${discordUserId}> **Peringatan Batas Waktu Pembayaran:** Waktu tersisa sekitar **2 menit lagi**. Jika tidak ada pembayaran, tiket ini akan ditutup otomatis oleh sistem.`,
+          }).catch(() => null);
+        }
+      }
+    } catch {}
+  }, 13 * 60 * 1000);
+
+  // 2. Auto-close tepat di menit ke-15
+  setTimeout(async () => {
+    try {
+      const currentOrder = await prisma.order.findUnique({
+        where: { id: orderId },
+        include: { payment: true, ticket: true, user: true },
+      });
+
+      if (
+        currentOrder &&
+        ["CREATED", "WAITING_PAYMENT", "PAYMENT_PENDING"].includes(currentOrder.status)
+      ) {
+        await cancelOrderAndCloseTicket({
+          orderId,
+          closedBy: "System (Timeout 15 Menit)",
+          reason: "Batas waktu pembayaran 15 menit habis.",
+        });
+
+        const ch = await client.channels.fetch(channelId).catch(() => null);
+        if (ch && ch.isTextBased()) {
+          const textCh = ch as TextChannel;
+          const timeoutEmbed = new EmbedBuilder()
+            .setTitle("⏳ Batas Waktu Pembayaran Habis (15 Menit)")
+            .setColor(0xe74c3c)
+            .setDescription(
+              `Halo <@${discordUserId}>,\n\n` +
+                `Tiket pesanan **#${orderNumber}** otomatis ditutup karena tidak ada aktivitas pembayaran selama 15 menit.\n\n` +
+                `🔒 Room tiket ini akan dihapus dalam **5 detik**. Silakan buat tiket baru jika ingin memesan kembali.`,
+            )
+            .setFooter({ text: "AutoVisend • Auto Close Timeout" })
+            .setTimestamp();
+
+          await textCh.send({ embeds: [timeoutEmbed] }).catch(() => null);
+          setTimeout(async () => {
+            try {
+              await textCh.delete("Tiket otomatis ditutup: batas waktu pembayaran 15 menit habis.");
+            } catch {}
+          }, 5000);
+        }
+
+        refreshOrderPanel(client).catch(() => {});
+      }
+    } catch {}
+  }, 15 * 60 * 1000);
+}
+
+// ======================================================
+// BATALKAN ORDER & TUTUP TIKET (ADMIN ATAU AUTO-CLOSE)
+// ======================================================
+
+export async function cancelOrderAndCloseTicket(params: {
+  orderId: number;
+  closedBy?: string;
+  reason?: string;
+}) {
+  return await prisma.$transaction(async (tx) => {
+    const order = await tx.order.findUnique({
+      where: { id: params.orderId },
+      include: { payment: true, ticket: true },
+    });
+
+    if (!order) return null;
+
+    if (
+      [
+        "PAID",
+        "CHECKING_SENDER",
+        "READY_TO_SEND",
+        "PROCESSING",
+        "VERIFYING",
+        "COMPLETED",
+      ].includes(order.status)
+    ) {
+      return order;
+    }
+
+    await tx.order.update({
+      where: { id: order.id },
+      data: {
+        status: "CANCELLED",
+        cancelledAt: new Date(),
+      },
+    });
+
+    if (order.payment && order.payment.status === "PENDING") {
+      await tx.payment.update({
+        where: { id: order.payment.id },
+        data: { status: "EXPIRED" },
+      });
+    }
+
+    if (order.ticket) {
+      await tx.ticket.update({
+        where: { id: order.ticket.id },
+        data: { status: "CLOSED", closedAt: new Date() },
+      });
+    }
+
+    await releaseQuotaForOrder(tx, order.id);
+
+    await tx.orderEvent.create({
+      data: {
+        orderId: order.id,
+        eventType: "ORDER_CANCELLED",
+        oldStatus: order.status,
+        newStatus: "CANCELLED",
+        description:
+          params.reason ||
+          `Tiket ditutup manual oleh ${params.closedBy || "Admin"}.`,
+      },
+    });
+
+    return order;
   });
 }
 

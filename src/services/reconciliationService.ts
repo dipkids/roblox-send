@@ -1,9 +1,12 @@
+import { Client, EmbedBuilder, TextChannel } from "discord.js";
 import { prisma } from "../database/prisma.js";
 import { notifyAdminOrder } from "./adminNotificationService.js";
 import { getMidtransConfig } from "./paymentService.js";
 import { recoverStaleOrders } from "./orderRecoveryService.js";
 import { processMidtransNotification } from "../web/midtransWebhook.js";
 import { notifyCustomerEscalated } from "./transferFailureService.js";
+import { releaseQuotaForOrder } from "./senderAdminService.js";
+import { refreshOrderPanel } from "./orderPanelService.js";
 
 type StatusBody = NonNullable<
   Parameters<typeof processMidtransNotification>[0]
@@ -312,6 +315,191 @@ export async function cancelAbandonedOrders() {
 }
 
 // ======================================================
+// AUTO CLOSE TIKET KEDALUWARSA (15 MENIT TANPA PEMBAYARAN)
+// ======================================================
+
+export async function autoCloseExpiredTickets(client: Client) {
+  const now = new Date();
+  const fifteenMinutesAgo = new Date(Date.now() - 15 * 60_000);
+
+  // 1. Cari order yang menunggu pembayaran & sudah melebihi 15 menit
+  const expiredOrders = await prisma.order.findMany({
+    where: {
+      status: {
+        in: [
+          "CREATED",
+          "WAITING_PROFILE_CONFIRMATION",
+          "WAITING_PAYMENT",
+          "PAYMENT_PENDING",
+        ],
+      },
+      OR: [
+        {
+          payment: {
+            expiredAt: { lt: now },
+            status: "PENDING",
+          },
+        },
+        {
+          payment: { is: null },
+          createdAt: { lt: fifteenMinutesAgo },
+        },
+        {
+          createdAt: { lt: fifteenMinutesAgo },
+        },
+      ],
+    },
+    include: {
+      payment: true,
+      ticket: true,
+      user: true,
+    },
+    take: 15,
+  });
+
+  if (expiredOrders.length > 0) {
+    for (const order of expiredOrders) {
+      try {
+        // SAFETY CHECK: Sebelum tutup tiket, cek status ke Midtrans terlebih dahulu!
+        // Jangan sampai customer bayar di menit 14:55 dan webhook sedikit delay.
+        if (order.payment?.midtransOrderId) {
+          const midtransRes = await fetchMidtransStatus(order.payment.midtransOrderId);
+          if (midtransRes.ok) {
+            const isPaid =
+              midtransRes.body.transaction_status === "settlement" ||
+              midtransRes.body.transaction_status === "capture";
+
+            if (isPaid) {
+              console.log(
+                `⚡ [AutoClose Safeguard] Order #${order.orderNumber} ternyata lunas di Midtrans! Memproses fulfillment alih-alih menutup tiket...`,
+              );
+              const result = await processMidtransNotification(midtransRes.body, "RECONCILE");
+              if (result.postWork) {
+                await result.postWork();
+              }
+              continue;
+            }
+          }
+        }
+
+        console.log(
+          `⏰ [AutoClose] Menutup tiket #${order.orderNumber} karena melebihi batas waktu 15 menit tanpa pembayaran.`,
+        );
+
+        // Batalkan order di database & lepas kuota sender
+        await prisma.$transaction(async (tx) => {
+          await tx.order.update({
+            where: { id: order.id },
+            data: {
+              status: "PAYMENT_TIMEOUT",
+              cancelledAt: new Date(),
+            },
+          });
+
+          if (order.payment) {
+            await tx.payment.update({
+              where: { id: order.payment.id },
+              data: { status: "EXPIRED" },
+            });
+          }
+
+          if (order.ticket) {
+            await tx.ticket.update({
+              where: { id: order.ticket.id },
+              data: { status: "CLOSED", closedAt: new Date() },
+            });
+          }
+
+          await releaseQuotaForOrder(tx, order.id);
+
+          await tx.orderEvent.create({
+            data: {
+              orderId: order.id,
+              eventType: "PAYMENT_TIMEOUT",
+              oldStatus: order.status,
+              newStatus: "PAYMENT_TIMEOUT",
+              description:
+                "Tiket otomatis ditutup karena tidak ada aktivitas pembayaran selama 15 menit.",
+            },
+          });
+        });
+
+        // Notifikasi dan hapus channel Discord jika channel masih ada
+        if (order.ticket?.channelId) {
+          try {
+            const channel = await client.channels.fetch(order.ticket.channelId).catch(() => null);
+            if (channel && channel.isTextBased()) {
+              const textCh = channel as TextChannel;
+              const timeoutEmbed = new EmbedBuilder()
+                .setTitle("⏳ Batas Waktu Pembayaran Habis (15 Menit)")
+                .setColor(0xe74c3c)
+                .setDescription(
+                  `Halo <@${order.user.discordUserId}>,\n\n` +
+                    `Tiket pesanan **#${order.orderNumber}** otomatis ditutup karena tidak ada pembayaran atau aktivitas selama 15 menit.\n\n` +
+                    `🔒 Room tiket ini akan dihapus dalam **5 detik**. Jika kamu masih ingin melakukan pembelian, silakan buka tiket baru di panel order.`,
+                )
+                .setFooter({ text: "AutoVisend • Auto Close Timeout" })
+                .setTimestamp();
+
+              await textCh.send({ embeds: [timeoutEmbed] }).catch(() => null);
+
+              setTimeout(async () => {
+                try {
+                  await textCh.delete("Tiket otomatis ditutup: batas waktu pembayaran 15 menit habis.");
+                } catch {}
+              }, 5000);
+            }
+          } catch (chErr) {
+            console.warn(`⚠️ Gagal menghapus channel tiket #${order.ticket.channelId}:`, chErr);
+          }
+        }
+
+        // Kirim DM ramah ke pembeli
+        try {
+          const discordUser = await client.users.fetch(order.user.discordUserId).catch(() => null);
+          if (discordUser) {
+            await discordUser.send({
+              content: `ℹ️ Halo! Tiket pesanan Robux kamu (**#${order.orderNumber}**) otomatis ditutup karena melebihi batas waktu pembayaran 15 menit. Silakan buka tiket baru di Discord Takemi Store jika ingin memesan kembali ya!`,
+            }).catch(() => null);
+          }
+        } catch {}
+      } catch (orderErr) {
+        console.error(`❌ Gagal memproses auto close untuk order #${order.id}:`, orderErr);
+      }
+    }
+
+    refreshOrderPanel(client).catch(() => {});
+  }
+
+  // 2. Bersihkan juga tiket COMPLETED yang belum ditutup lebih dari 15 menit setelah selesai
+  const oldCompletedTickets = await prisma.ticket.findMany({
+    where: {
+      status: "OPEN",
+      order: {
+        status: "COMPLETED",
+        completedAt: { lt: fifteenMinutesAgo },
+      },
+    },
+    take: 10,
+  });
+
+  for (const t of oldCompletedTickets) {
+    try {
+      await prisma.ticket.update({
+        where: { id: t.id },
+        data: { status: "CLOSED", closedAt: new Date() },
+      });
+      const ch = await client.channels.fetch(t.channelId).catch(() => null);
+      if (ch && "delete" in ch) {
+        await (ch as TextChannel)
+          .delete("Tiket selesai ditutup otomatis setelah 15 menit.")
+          .catch(() => {});
+      }
+    } catch {}
+  }
+}
+
+// ======================================================
 // PENJALAN WORKER
 // ======================================================
 
@@ -326,7 +514,7 @@ async function runStep(name: string, fn: () => Promise<void>) {
   }
 }
 
-export async function runBackgroundWorkers() {
+export async function runBackgroundWorkers(client?: Client) {
   if (running) {
     return;
   }
@@ -338,6 +526,9 @@ export async function runBackgroundWorkers() {
     await runStep("reconcilePayments", reconcilePayments);
     await runStep("escalateStaleCustomerWaits", escalateStaleCustomerWaits);
     await runStep("cancelAbandonedOrders", cancelAbandonedOrders);
+    if (client) {
+      await runStep("autoCloseExpiredTickets", () => autoCloseExpiredTickets(client));
+    }
   } finally {
     running = false;
   }

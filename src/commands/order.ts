@@ -16,7 +16,7 @@ export const data = new SlashCommandBuilder()
   .setDescription("Pasang / perbarui panel order Robux di channel");
 
 export async function execute(interaction: ChatInputCommandInteraction) {
-  const { embed, components } = await buildOrderPanel();
+  const { embed, components } = await buildOrderPanel(interaction.client);
 
   const channel = interaction.channel;
   if (channel && "send" in channel && interaction.inGuild()) {

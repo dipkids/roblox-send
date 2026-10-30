@@ -18,7 +18,7 @@ const KEY_MESSAGE_ID = "ORDER_PANEL_MESSAGE_ID";
 /**
  * Membangun embed dan komponen tombol untuk panel order Robux.
  */
-export async function buildOrderPanel(): Promise<{
+export async function buildOrderPanel(client?: Client): Promise<{
   embed: EmbedBuilder;
   components: ActionRowBuilder<ButtonBuilder>[];
 }> {
@@ -27,6 +27,19 @@ export async function buildOrderPanel(): Promise<{
   const showCustom = await isCustomOrderEnabled();
 
   const isLimitAll = stock.allLimitReached;
+
+  // List harga 100 - 1000 Robux
+  const packages = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000];
+  const robuxEmoji =
+    client?.emojis.cache.find((e) => e.name.toLowerCase() === "robux")?.toString() ??
+    ":robux:";
+
+  const priceListLines = packages
+    .map(
+      (amt) =>
+        `${robuxEmoji} ${amt} Robux: Rp${(amt * rate).toLocaleString("id-ID")}`,
+    )
+    .join("\n");
 
   // ==============================
   // ROW 1: 100 - 500 ROBUX
@@ -127,6 +140,8 @@ export async function buildOrderPanel(): Promise<{
         "⚠️ **Mohon Maaf, Semua Akun Pengirim Sedang Limit.**\n\n" +
           "Batas transfer harian/bulanan pada akun Roblox pengirim saat ini telah tercapai.\n" +
           "Tombol pembelian dinonaktifkan sementara sampai kuota ter-reset atau akun pengirim baru ditambahkan.\n\n" +
+          `✨ **Rate Harga:** Rp${rate.toLocaleString("id-ID")} / Robux\n\n` +
+          `${priceListLines}\n\n` +
           "Silakan cek kembali beberapa saat lagi atau hubungi admin.",
       )
       .setFooter({ text: "Takemi Store • Status Stok: Limit / Kosong" })
@@ -138,6 +153,7 @@ export async function buildOrderPanel(): Promise<{
       .setDescription(
         `✨ **Rate Harga:** Rp${rate.toLocaleString("id-ID")} / Robux\n` +
           `📦 **Stok Tersedia:** ~${stock.totalRemainingRobux.toLocaleString("id-ID")} Robux\n\n` +
+          `${priceListLines}\n\n` +
           "Silakan klik salah satu tombol paket Robux di bawah untuk membuat tiket pembelian:",
       )
       .setFooter({ text: "Takemi Store • Otomatis & Terpercaya" })
@@ -213,7 +229,7 @@ export async function refreshOrderPanel(client: Client): Promise<boolean> {
       return false;
     }
 
-    const { embed, components } = await buildOrderPanel();
+    const { embed, components } = await buildOrderPanel(client);
 
     await message.edit({
       embeds: [embed],

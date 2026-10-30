@@ -239,7 +239,48 @@ client.once("ready", async () => {
       console.warn("⚠️ Gagal worker 30 menit panel order:", err);
     }
   }, 30 * 60 * 1_000);
+
+  // 3. Auto-sync presisi tepat jam 07:00:05 WIB (00:00:05 UTC) saat reset harian Roblox
+  scheduleDailyReset7AM(client);
 });
+
+/**
+ * Menjadwalkan sinkronisasi otomatis tepat saat kuota harian Roblox di-reset
+ * pada pukul 07:00:05 WIB (00:00:05 UTC).
+ */
+function scheduleDailyReset7AM(client: Client) {
+  function getMsUntilNext7AMWib(): number {
+    const now = new Date();
+    // 07:00:05 WIB = 00:00:05 UTC (diberi jeda 5 detik agar server Roblox selesai reset)
+    const next7AM = new Date(now);
+    next7AM.setUTCHours(0, 0, 5, 0);
+    if (now.getTime() >= next7AM.getTime()) {
+      next7AM.setUTCDate(next7AM.getUTCDate() + 1);
+    }
+    return next7AM.getTime() - now.getTime();
+  }
+
+  function armTimer() {
+    const msUntil = getMsUntilNext7AMWib();
+    const hours = (msUntil / (1000 * 60 * 60)).toFixed(2);
+    console.log(`⏰ [Jadwal Reset 07:00 WIB] Sinkronisasi reset kuota harian Roblox berikutnya dalam ${hours} jam.`);
+
+    setTimeout(async () => {
+      try {
+        console.log("🌅 [07:00 WIB] Waktu reset harian Roblox tiba! Menyinkronkan kuota baru & memperbarui Order Panel...");
+        await getSendersLiveEconomy();
+        await refreshOrderPanel(client);
+        console.log("✅ [07:00 WIB] Sinkronisasi kuota sender Roblox & Order Panel Discord berhasil!");
+      } catch (err) {
+        console.error("❌ Gagal saat auto-sync 07:00 WIB:", err);
+      } finally {
+        armTimer();
+      }
+    }, msUntil);
+  }
+
+  armTimer();
+}
 
 // ==============================
 // INTERACTION

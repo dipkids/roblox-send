@@ -419,19 +419,12 @@ export async function reserveSenderForOrder(
 export function getNextDailyReset(
   now: Date,
 ): Date {
+  // Reset harian Roblox terjadi pada 00:00:00 UTC (tepat 07:00:00 WIB)
   const next = new Date(now);
-
-  next.setDate(
-    next.getDate() + 1,
-  );
-
-  next.setHours(
-    0,
-    0,
-    0,
-    0,
-  );
-
+  next.setUTCHours(0, 0, 0, 0);
+  if (now.getTime() >= next.getTime()) {
+    next.setUTCDate(next.getUTCDate() + 1);
+  }
   return next;
 }
 
@@ -442,15 +435,9 @@ export function getNextDailyReset(
 export function getNextMonthlyReset(
   now: Date,
 ): Date {
+  // Reset bulanan Roblox terjadi tanggal 1 setiap bulan pukul 00:00:00 UTC (07:00:00 WIB)
   const next = new Date(
-    now.getFullYear(),
-    now.getMonth() + 1,
-    1,
-    0,
-    0,
-    0,
-    0,
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0, 0),
   );
-
   return next;
 }

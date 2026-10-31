@@ -1983,9 +1983,11 @@ async function handleInteraction(interaction: Interaction) {
         // VALIDASI DISPLAY NAME
         // ==============================
 
+        const cleanDisplayName = displayName.trim().replace(/^@+/, "");
+
         if (
-          profile.displayName.toLowerCase() !==
-          displayName.toLowerCase()
+          profile.displayName.trim().toLowerCase() !==
+          cleanDisplayName.toLowerCase()
         ) {
           await interaction.editReply({
             content:

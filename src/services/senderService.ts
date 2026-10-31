@@ -17,9 +17,6 @@ export async function findAvailableSender(
       where: {
         status: "ACTIVE",
       },
-      orderBy: {
-        dailyUsed: "asc",
-      },
     });
 
   if (senders.length === 0) {
@@ -27,6 +24,14 @@ export async function findAvailableSender(
   }
 
   const now = new Date();
+  const candidates: Array<{
+    sender: (typeof senders)[number];
+    dailyUsed: number;
+    monthlyUsed: number;
+    dailyRemaining: number;
+    monthlyRemaining: number;
+    remainingQuota: number;
+  }> = [];
 
   for (const sender of senders) {
     let dailyUsed =
@@ -58,45 +63,59 @@ export async function findAvailableSender(
     }
 
     // ==========================================
-    // CHECK DAILY LIMIT
+    // CHECK DAILY & MONTHLY LIMIT
     // ==========================================
 
     const dailyRemaining =
       sender.dailyLimit -
       dailyUsed;
 
-    if (
-      dailyRemaining <
-      robuxAmount
-    ) {
-      continue;
-    }
-
-    // ==========================================
-    // CHECK MONTHLY LIMIT
-    // ==========================================
-
     const monthlyRemaining =
       sender.monthlyLimit -
       monthlyUsed;
 
-    if (
-      monthlyRemaining <
-      robuxAmount
-    ) {
-      continue;
-    }
+    const remainingQuota = Math.min(dailyRemaining, monthlyRemaining);
 
-    return {
-      sender,
-      dailyUsed,
-      monthlyUsed,
-      dailyRemaining,
-      monthlyRemaining,
-    };
+    if (
+      dailyRemaining >= robuxAmount &&
+      monthlyRemaining >= robuxAmount
+    ) {
+      candidates.push({
+        sender,
+        dailyUsed,
+        monthlyUsed,
+        dailyRemaining,
+        monthlyRemaining,
+        remainingQuota,
+      });
+    }
   }
 
-  return null;
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  // Urutkan sender dari sisa limit PALING SEDIKIT (ASC),
+  // agar sender 1 dihabiskan sampai limit dulu sebelum beralih ke sender 2.
+  // Jika sisa limit sama, pilih sender dengan limit total terkecil atau ID terkecil.
+  candidates.sort((a, b) => {
+    if (a.remainingQuota !== b.remainingQuota) {
+      return a.remainingQuota - b.remainingQuota;
+    }
+    if (a.sender.dailyLimit !== b.sender.dailyLimit) {
+      return a.sender.dailyLimit - b.sender.dailyLimit;
+    }
+    return a.sender.id - b.sender.id;
+  });
+
+  const best = candidates[0];
+  return {
+    sender: best.sender,
+    dailyUsed: best.dailyUsed,
+    monthlyUsed: best.monthlyUsed,
+    dailyRemaining: best.dailyRemaining,
+    monthlyRemaining: best.monthlyRemaining,
+  };
 }
 
 

@@ -137,20 +137,18 @@ export async function reserveSenderForOrder(
       // CARI SENDER DENGAN KUOTA
       // ==========================================
 
-      let selectedSender:
-        | (typeof senders)[number]
-        | null = null;
+      type CandidateSender = {
+        sender: (typeof senders)[number];
+        dailyUsed: number;
+        monthlyUsed: number;
+        dailyResetAt: Date;
+        monthlyResetAt: Date;
+        dailyRemaining: number;
+        monthlyRemaining: number;
+        remainingQuota: number;
+      };
 
-      let selectedDailyUsed = 0;
-      let selectedMonthlyUsed = 0;
-
-      let selectedDailyResetAt:
-        | Date
-        | null = null;
-
-      let selectedMonthlyResetAt:
-        | Date
-        | null = null;
+      const candidates: CandidateSender[] = [];
 
       for (const sender of senders) {
         let dailyUsed =
@@ -219,29 +217,62 @@ export async function reserveSenderForOrder(
           sender.monthlyLimit -
           monthlyUsed;
 
+        const remainingQuota = Math.min(dailyRemaining, monthlyRemaining);
+
         if (
           dailyRemaining >=
             order.robuxAmount &&
           monthlyRemaining >=
             order.robuxAmount
         ) {
-          selectedSender =
-            sender;
-
-          selectedDailyUsed =
-            dailyUsed;
-
-          selectedMonthlyUsed =
-            monthlyUsed;
-
-          selectedDailyResetAt =
-            dailyResetAt;
-
-          selectedMonthlyResetAt =
-            monthlyResetAt;
-
-          break;
+          candidates.push({
+            sender,
+            dailyUsed,
+            monthlyUsed,
+            dailyResetAt,
+            monthlyResetAt,
+            dailyRemaining,
+            monthlyRemaining,
+            remainingQuota,
+          });
         }
+      }
+
+      // Urutkan sender dari sisa limit PALING SEDIKIT (ASC),
+      // agar sender 1 dihabiskan sampai limit dulu sebelum beralih ke sender 2.
+      // Jika sisa limit sama, pilih sender dengan limit total terkecil atau ID terkecil.
+      candidates.sort((a, b) => {
+        if (a.remainingQuota !== b.remainingQuota) {
+          return a.remainingQuota - b.remainingQuota;
+        }
+        if (a.sender.dailyLimit !== b.sender.dailyLimit) {
+          return a.sender.dailyLimit - b.sender.dailyLimit;
+        }
+        return a.sender.id - b.sender.id;
+      });
+
+      let selectedSender:
+        | (typeof senders)[number]
+        | null = null;
+
+      let selectedDailyUsed = 0;
+      let selectedMonthlyUsed = 0;
+
+      let selectedDailyResetAt:
+        | Date
+        | null = null;
+
+      let selectedMonthlyResetAt:
+        | Date
+        | null = null;
+
+      if (candidates.length > 0) {
+        const best = candidates[0];
+        selectedSender = best.sender;
+        selectedDailyUsed = best.dailyUsed;
+        selectedMonthlyUsed = best.monthlyUsed;
+        selectedDailyResetAt = best.dailyResetAt;
+        selectedMonthlyResetAt = best.monthlyResetAt;
       }
 
       // ==========================================

@@ -1336,8 +1336,16 @@ async function handleInteraction(interaction: Interaction) {
         } else {
           await customerRequestHelp(orderId, interaction.user.id);
 
+          if (interaction.channel && "permissionOverwrites" in interaction.channel) {
+            await (interaction.channel as TextChannel).permissionOverwrites
+              .edit(interaction.user.id, {
+                SendMessages: true,
+              })
+              .catch(() => {});
+          }
+
           await interaction.editReply({
-            content: "🙋 Permintaan bantuan sudah dikirim ke admin.",
+            content: "🙋 Permintaan bantuan sudah dikirim ke admin. Akses kirim pesan kamu di channel ini telah dibuka.",
             embeds: [],
             components: [],
           });
@@ -1402,13 +1410,59 @@ async function handleInteraction(interaction: Interaction) {
         "support_",
       )
     ) {
-      await interaction.reply({
-        content:
-          "🆘 **Bantuan**\n\n" +
-          "Permintaan bantuan akan diteruskan ke admin.",
+      const orderId = Number(interaction.customId.replace("support_", ""));
+      const channel = interaction.channel;
 
-        flags: MessageFlags.Ephemeral,
-      });
+      try {
+        const order = await prisma.order.findUnique({
+          where: { id: orderId },
+          include: { user: true, ticket: true },
+        });
+
+        const targetUserId = order?.user.discordUserId || interaction.user.id;
+
+        // Buka izin kirim pesan untuk customer di channel tiket ini
+        if (channel && "permissionOverwrites" in channel) {
+          const textChannel = channel as TextChannel;
+          await textChannel.permissionOverwrites.edit(targetUserId, {
+            SendMessages: true,
+          });
+        }
+
+        // Tandai supportRequested di database jika ada tiket terkait
+        if (order?.ticket && !order.ticket.supportRequested) {
+          await prisma.ticket.update({
+            where: { id: order.ticket.id },
+            data: { supportRequested: true },
+          });
+        }
+
+        // Tag admin di channel tiket
+        const adminRoleId = process.env.ADMIN_ROLE_ID;
+        const adminPing = adminRoleId ? `<@&${adminRoleId}>` : "Admin / Staff";
+        const orderNum = order?.orderNumber ? `#${order.orderNumber}` : `#${orderId}`;
+
+        if (channel && "send" in channel) {
+          await (channel as TextChannel).send({
+            content:
+              `🆘 ${adminPing} — Customer <@${targetUserId}> membutuhkan bantuan di order **${orderNum}**!\n` +
+              `💬 *Akses kirim pesan untuk customer telah dibuka. Silakan sampaikan pertanyaan atau kendala kamu di sini.*`,
+          });
+        }
+
+        await interaction.reply({
+          content:
+            "🆘 **Bantuan Berhasil Dipanggil!**\n\n" +
+            "Admin / Staff telah di-tag di channel ini dan akses kirim pesan kamu sekarang sudah dibuka. Silakan ketik langsung pesan atau kendala kamu ya!",
+          flags: MessageFlags.Ephemeral,
+        });
+      } catch (err: any) {
+        console.error("❌ Gagal memproses tombol support:", err);
+        await interaction.reply({
+          content: `⚠️ Terjadi kendala saat memproses bantuan: ${err?.message || "Silakan hubungi admin secara manual."}`,
+          flags: MessageFlags.Ephemeral,
+        });
+      }
 
       return;
     }

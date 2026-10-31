@@ -96,8 +96,10 @@ export async function createOrderTicket(params: {
         type: OverwriteType.Member,
         allow: [
           PermissionFlagsBits.ViewChannel,
-          PermissionFlagsBits.SendMessages,
           PermissionFlagsBits.ReadMessageHistory,
+        ],
+        deny: [
+          PermissionFlagsBits.SendMessages,
         ],
       },
       {
@@ -170,10 +172,12 @@ export async function sendOrderTicketMessage(params: {
   const description = params.paymentUrl
     ? "Order kamu berhasil dibuat.\n\n" +
       "Silakan klik tombol **Bayar Sekarang (QRIS)** di bawah untuk melakukan pembayaran via **QRIS / GoPay / E-Wallet**.\n\n" +
-      "Pembayaran akan terdeteksi otomatis setelah berhasil."
+      "Pembayaran akan terdeteksi otomatis setelah berhasil.\n\n" +
+      "💡 *Butuh bantuan staf? Klik tombol **Butuh Bantuan** di bawah untuk membuka akses chat dan memanggil admin.*"
     : "Order kamu berhasil dibuat.\n\n" +
       "Silakan scan QRIS di bawah untuk melakukan pembayaran.\n\n" +
-      "Pembayaran akan terdeteksi otomatis setelah berhasil.";
+      "Pembayaran akan terdeteksi otomatis setelah berhasil.\n\n" +
+      "💡 *Butuh bantuan staf? Klik tombol **Butuh Bantuan** di bawah untuk membuka akses chat dan memanggil admin.*";
 
   const paymentInstruction = params.paymentUrl
     ? "Klik tombol **Bayar Sekarang (QRIS)** di bawah untuk membayar."

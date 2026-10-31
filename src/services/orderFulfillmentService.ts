@@ -1,5 +1,6 @@
 import { prisma } from "../database/prisma.js";
 import { reserveSenderForOrder } from "./transferService.js";
+import { getSendersLiveEconomy } from "./robloxEconomyService.js";
 import { startTransfer } from "./transferExecutor.js";
 import { executeTransfer, isRobloxBrowserBusy } from "./robloxTransferService.js";
 import { sendOrderCompletionReceipt, sendTicketProcessingEmbed } from "./ticketService.js";
@@ -393,6 +394,13 @@ async function runFulfillment(orderId: number, origin: FailureOrigin) {
       console.log(
         "📦 Tidak ada transfer → melakukan sender reservation...",
       );
+
+      // Selalu sinkronkan saldo & limit Roblox real-time sebelum memilih sender
+      try {
+        await getSendersLiveEconomy();
+      } catch (syncErr) {
+        console.warn("⚠️ Gagal sync live economy sebelum reserve sender:", syncErr);
+      }
 
       const reservation = await reserveSenderForOrder(orderId);
 

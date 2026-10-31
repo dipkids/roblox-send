@@ -30,6 +30,7 @@ export async function findAvailableSender(
     monthlyUsed: number;
     dailyRemaining: number;
     monthlyRemaining: number;
+    balanceRemaining: number;
     remainingQuota: number;
   }> = [];
 
@@ -63,7 +64,7 @@ export async function findAvailableSender(
     }
 
     // ==========================================
-    // CHECK DAILY & MONTHLY LIMIT
+    // CHECK DAILY & MONTHLY LIMIT & ROBUX BALANCE
     // ==========================================
 
     const dailyRemaining =
@@ -74,11 +75,15 @@ export async function findAvailableSender(
       sender.monthlyLimit -
       monthlyUsed;
 
-    const remainingQuota = Math.min(dailyRemaining, monthlyRemaining);
+    const balanceRemaining =
+      sender.robuxBalance ?? 0;
+
+    const remainingQuota = Math.min(dailyRemaining, monthlyRemaining, balanceRemaining);
 
     if (
       dailyRemaining >= robuxAmount &&
-      monthlyRemaining >= robuxAmount
+      monthlyRemaining >= robuxAmount &&
+      balanceRemaining >= robuxAmount
     ) {
       candidates.push({
         sender,
@@ -86,6 +91,7 @@ export async function findAvailableSender(
         monthlyUsed,
         dailyRemaining,
         monthlyRemaining,
+        balanceRemaining,
         remainingQuota,
       });
     }
@@ -158,7 +164,8 @@ export async function getSenderStockStatus(): Promise<{
 
     const dailyRemaining = Math.max(0, sender.dailyLimit - dailyUsed);
     const monthlyRemaining = Math.max(0, sender.monthlyLimit - monthlyUsed);
-    const available = Math.min(dailyRemaining, monthlyRemaining);
+    const balanceRemaining = Math.max(0, sender.robuxBalance ?? 0);
+    const available = Math.min(dailyRemaining, monthlyRemaining, balanceRemaining);
 
     if (available > 0) {
       anyAvailable = true;

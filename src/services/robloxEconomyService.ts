@@ -348,6 +348,7 @@ export async function getSendersLiveEconomy() {
               monthlyUsed: actualMonthlyUsed,
               dailyLimit: actualDailyLimit,
               monthlyLimit: actualMonthlyLimit,
+              ...(robuxBalance !== null ? { robuxBalance } : {}),
             },
           });
         } catch {

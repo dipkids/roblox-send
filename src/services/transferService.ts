@@ -82,6 +82,7 @@ export async function reserveSenderForOrder(
             monthlyLimit: number;
             dailyUsed: number;
             monthlyUsed: number;
+            robuxBalance: number;
             dailyResetAt: Date | null;
             monthlyResetAt: Date | null;
             createdAt: Date;
@@ -97,6 +98,7 @@ export async function reserveSenderForOrder(
             "monthlyLimit",
             "dailyUsed",
             "monthlyUsed",
+            "robuxBalance",
             "dailyResetAt",
             "monthlyResetAt",
             "createdAt",
@@ -145,6 +147,7 @@ export async function reserveSenderForOrder(
         monthlyResetAt: Date;
         dailyRemaining: number;
         monthlyRemaining: number;
+        balanceRemaining: number;
         remainingQuota: number;
       };
 
@@ -217,13 +220,19 @@ export async function reserveSenderForOrder(
           sender.monthlyLimit -
           monthlyUsed;
 
-        const remainingQuota = Math.min(dailyRemaining, monthlyRemaining);
+        const balanceRemaining =
+          sender.robuxBalance ?? 0;
+
+        const remainingQuota = Math.min(
+          dailyRemaining,
+          monthlyRemaining,
+          balanceRemaining,
+        );
 
         if (
-          dailyRemaining >=
-            order.robuxAmount &&
-          monthlyRemaining >=
-            order.robuxAmount
+          dailyRemaining >= order.robuxAmount &&
+          monthlyRemaining >= order.robuxAmount &&
+          balanceRemaining >= order.robuxAmount
         ) {
           candidates.push({
             sender,
@@ -233,14 +242,16 @@ export async function reserveSenderForOrder(
             monthlyResetAt,
             dailyRemaining,
             monthlyRemaining,
+            balanceRemaining,
             remainingQuota,
           });
         }
       }
 
-      // Urutkan sender dari sisa limit PALING SEDIKIT (ASC),
-      // agar sender 1 dihabiskan sampai limit dulu sebelum beralih ke sender 2.
-      // Jika sisa limit sama, pilih sender dengan limit total terkecil atau ID terkecil.
+      // Urutkan sender dari sisa kuota efektif PALING SEDIKIT (ASC),
+      // agar sender 1 dihabiskan sampai batas kuota/saldonya dulu sebelum beralih ke sender 2.
+      // Jika order melebihi sisa kuota atau saldo sender 1, sender 1 tereliminasi
+      // dan bot langsung memilih sender berikutnya yang kuota dan saldonya mencukupi.
       candidates.sort((a, b) => {
         if (a.remainingQuota !== b.remainingQuota) {
           return a.remainingQuota - b.remainingQuota;
@@ -326,6 +337,11 @@ export async function reserveSenderForOrder(
       // UPDATE SENDER
       // ==========================================
 
+      const newRobuxBalance = Math.max(
+        0,
+        (selectedSender.robuxBalance ?? 0) - order.robuxAmount,
+      );
+
       const updatedSender =
         await tx.senderAccount.update({
           where: {
@@ -337,6 +353,9 @@ export async function reserveSenderForOrder(
 
             monthlyUsed:
               newMonthlyUsed,
+
+            robuxBalance:
+              newRobuxBalance,
 
             dailyResetAt:
               selectedDailyResetAt,

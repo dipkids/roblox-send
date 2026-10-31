@@ -84,6 +84,7 @@ model SenderAccount {
   monthlyLimit   Int          @default(1000)
   dailyUsed      Int          @default(0)
   monthlyUsed    Int          @default(0)
+  robuxBalance   Int          @default(0)
   dailyResetAt   DateTime?
   monthlyResetAt DateTime?
   createdAt      DateTime     @default(now())

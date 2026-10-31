@@ -663,23 +663,42 @@ export async function sendOrderCompletedFlow(params: {
     } catch {}
   }
 
-  // Ambil avatar sender dari Roblox CDN
+  // Ambil avatar dan Display Name sender dari Roblox API
   let senderAvatarUrl: string | undefined;
+  let senderDisplayName = senderName;
+
   if (senderRobloxId) {
     try {
-      const res = await fetch(
-        `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${senderRobloxId}&size=150x150&format=Png`,
-        {
+      const [avatarRes, userInfoRes] = await Promise.all([
+        fetch(
+          `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${senderRobloxId}&size=150x150&format=Png`,
+          {
+            headers: {
+              Accept: "application/json",
+              "User-Agent":
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            },
+          },
+        ).catch(() => null),
+        fetch(`https://users.roblox.com/v1/users/${senderRobloxId}`, {
           headers: {
             Accept: "application/json",
             "User-Agent":
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           },
-        },
-      );
-      if (res.ok) {
-        const d = (await res.json()) as { data?: { imageUrl?: string }[] };
+        }).catch(() => null),
+      ]);
+
+      if (avatarRes && avatarRes.ok) {
+        const d = (await avatarRes.json()) as { data?: { imageUrl?: string }[] };
         senderAvatarUrl = d.data?.[0]?.imageUrl;
+      }
+
+      if (userInfoRes && userInfoRes.ok) {
+        const uData = (await userInfoRes.json()) as { displayName?: string };
+        if (uData.displayName) {
+          senderDisplayName = uData.displayName;
+        }
       }
     } catch {
       // Abaikan
@@ -707,6 +726,7 @@ export async function sendOrderCompletedFlow(params: {
   let attachment: AttachmentBuilder | null = null;
   try {
     const cardBuffer = await renderRobloxReceiptCard({
+      senderDisplayName: senderDisplayName,
       senderUsername: senderName,
       senderAvatarUrl: senderDataUri || senderAvatarUrl,
       receiverUsername: order.robloxProfile.username,

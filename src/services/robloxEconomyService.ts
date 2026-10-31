@@ -396,7 +396,8 @@ export async function getSendersLiveEconomy() {
 // ============================================================
 
 export async function renderRobloxReceiptCard(params: {
-  senderUsername: string;
+  senderUsername?: string;
+  senderDisplayName?: string;
   senderAvatarUrl?: string;
   receiverUsername: string;
   receiverAvatarUrl?: string;
@@ -421,6 +422,8 @@ export async function renderRobloxReceiptCard(params: {
       );
     const senderImg = params.senderAvatarUrl || defaultAvatar;
     const receiverImg = params.receiverAvatarUrl || defaultAvatar;
+    const senderDisplay =
+      params.senderDisplayName || params.senderUsername || "Roblox User";
     const dateFormatted =
       params.dateStr ||
       new Intl.DateTimeFormat("id-ID", {
@@ -523,8 +526,8 @@ export async function renderRobloxReceiptCard(params: {
     </div>
     <div class="table-body">
       <div class="user-cell">
-        <img class="avatar" src="${senderImg}" alt="${params.senderUsername}">
-        <span class="username">${params.senderUsername}</span>
+        <img class="avatar" src="${senderImg}" alt="${senderDisplay}">
+        <span class="username">${senderDisplay}</span>
       </div>
       <div class="desc-cell">
         <img class="avatar" src="${receiverImg}" alt="${params.receiverUsername}">

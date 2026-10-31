@@ -12,8 +12,8 @@ async function lockReviewOrder(
   tx: Prisma.TransactionClient,
   orderId: number,
 ) {
-  const rows = await tx.$queryRaw<Array<{ id: number; status: string }>>`
-    SELECT id, status FROM "Order" WHERE id = ${orderId} FOR UPDATE
+  const rows = await tx.$queryRaw<Array<{ id: number; status: string; robuxAmount: number }>>`
+    SELECT id, status, "robuxAmount" FROM "Order" WHERE id = ${orderId} FOR UPDATE
   `;
 
   if (rows.length === 0) {
@@ -60,18 +60,41 @@ export async function adminRetryOrder(
         transferId = failed.id;
         previousAttempts = failed.attemptCount;
 
-        // Jatah retry baru setelah intervensi admin.
-        await tx.transfer.update({
-          where: { id: failed.id },
-          data: {
-            status: "PENDING",
-            attemptCount: 0,
-            errorCode: null,
-            errorMessage: null,
-          },
+        // Cek apakah sender sebelumnya masih mampu memproses order ini
+        const currentSender = await tx.senderAccount.findUnique({
+          where: { id: failed.senderAccountId },
         });
 
-        nextStatus = "READY_TO_SEND";
+        const dailyRemaining = (currentSender?.dailyLimit ?? 0) - (currentSender?.dailyUsed ?? 0);
+        const monthlyRemaining = (currentSender?.monthlyLimit ?? 0) - (currentSender?.monthlyUsed ?? 0);
+        const balanceRemaining = currentSender?.robuxBalance ?? 0;
+        const senderCanHandle =
+          currentSender?.status === "ACTIVE" &&
+          dailyRemaining >= order.robuxAmount &&
+          monthlyRemaining >= order.robuxAmount &&
+          balanceRemaining >= order.robuxAmount;
+
+        if (!senderCanHandle) {
+          // Sender lama sudah tidak sanggup (habis kuota / saldo).
+          // Hapus transfer lama dan kembalikan order ke PAID agar reservasi memilih sender baru yang siap.
+          await tx.transfer.delete({
+            where: { id: failed.id },
+          });
+          nextStatus = "PAID";
+        } else {
+          // Jatah retry baru setelah intervensi admin pada sender yang sama.
+          await tx.transfer.update({
+            where: { id: failed.id },
+            data: {
+              status: "PENDING",
+              attemptCount: 0,
+              errorCode: null,
+              errorMessage: null,
+            },
+          });
+
+          nextStatus = "READY_TO_SEND";
+        }
       } else {
         const totalTransfers = await tx.transfer.count({ where: { orderId } });
 

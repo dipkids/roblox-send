@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright";
 import { prisma } from "../database/prisma.js";
+import { fetchTransferRecords, estimateUsage } from "./robloxTransactionService.js";
 
 export interface RobloxSenderValidation {
   valid: boolean;
@@ -309,38 +310,82 @@ export async function getSendersLiveEconomy() {
           // Abaikan
         }
 
-        // Tarik pemakaian harian & bulanan dari My Transactions (transaction-totals)
+        // Tarik pemakaian harian & bulanan langsung dari Ledger Mutasi Roblox (akurat untuk manual transfer WA)
+        let ledgerSuccess = false;
         try {
-          const [dayRes, monthRes] = await Promise.all([
-            fetch(`https://economy.roblox.com/v2/users/${sender.robloxUserId}/transaction-totals?timeFrame=Day&transactionType=summary`, {
-              headers: {
-                Cookie: `.ROBLOSECURITY=${cookie}`,
-                Accept: "application/json",
-                Referer: "https://www.roblox.com/",
-              },
-              signal: AbortSignal.timeout(5000),
-            }),
-            fetch(`https://economy.roblox.com/v2/users/${sender.robloxUserId}/transaction-totals?timeFrame=Month&transactionType=summary`, {
-              headers: {
-                Cookie: `.ROBLOSECURITY=${cookie}`,
-                Accept: "application/json",
-                Referer: "https://www.roblox.com/",
-              },
-              signal: AbortSignal.timeout(5000),
-            }),
-          ]);
-
-          if (dayRes.ok) {
-            const dayData = (await dayRes.json()) as { outgoingRobuxTransferTotal?: number };
-            actualDailyUsed = Math.abs(dayData.outgoingRobuxTransferTotal ?? 0);
+          const since = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+          const ledgerRes = await fetchTransferRecords(sender.robloxUserId, since);
+          if (ledgerRes.ok && Array.isArray(ledgerRes.value)) {
+            const est = estimateUsage(ledgerRes.value);
+            actualDailyUsed = est.dailyUsed;
+            actualMonthlyUsed = est.monthlyUsed;
+            ledgerSuccess = true;
           }
+        } catch {
+          // Abaikan, lanjut ke fallback transaction-totals
+        }
 
-          if (monthRes.ok) {
-            const monthData = (await monthRes.json()) as { outgoingRobuxTransferTotal?: number };
-            actualMonthlyUsed = Math.abs(monthData.outgoingRobuxTransferTotal ?? 0);
+        // Fallback: jika ledger gagal, gunakan transaction-totals
+        if (!ledgerSuccess) {
+          try {
+            const dayRes = await fetch(
+              `https://economy.roblox.com/v2/users/${sender.robloxUserId}/transaction-totals?timeFrame=Day&transactionType=summary`,
+              {
+                headers: {
+                  Cookie: `.ROBLOSECURITY=${cookie}`,
+                  Accept: "application/json",
+                  Referer: "https://www.roblox.com/",
+                },
+                signal: AbortSignal.timeout(5000),
+              },
+            );
+
+            if (dayRes.ok) {
+              const dayData = (await dayRes.json()) as {
+                outgoingRobuxTransferTotal?: number;
+                errors?: any[];
+              };
+              if (
+                typeof dayData.outgoingRobuxTransferTotal === "number" &&
+                !dayData.errors?.length
+              ) {
+                actualDailyUsed = Math.abs(dayData.outgoingRobuxTransferTotal);
+              }
+            }
+
+            const monthRes = await fetch(
+              `https://economy.roblox.com/v2/users/${sender.robloxUserId}/transaction-totals?timeFrame=Month&transactionType=summary`,
+              {
+                headers: {
+                  Cookie: `.ROBLOSECURITY=${cookie}`,
+                  Accept: "application/json",
+                  Referer: "https://www.roblox.com/",
+                },
+                signal: AbortSignal.timeout(5000),
+              },
+            );
+
+            if (monthRes.ok) {
+              const monthData = (await monthRes.json()) as {
+                outgoingRobuxTransferTotal?: number;
+                errors?: any[];
+              };
+              if (
+                typeof monthData.outgoingRobuxTransferTotal === "number" &&
+                !monthData.errors?.length
+              ) {
+                actualMonthlyUsed = Math.abs(
+                  monthData.outgoingRobuxTransferTotal,
+                );
+              }
+            }
+          } catch {
+            // Abaikan jika timeout
           }
+        }
 
-          // Sinkronkan data aktual ke database Prisma
+        // Sinkronkan data aktual ke database Prisma
+        try {
           await prisma.senderAccount.update({
             where: { id: sender.id },
             data: {
@@ -352,7 +397,7 @@ export async function getSendersLiveEconomy() {
             },
           });
         } catch {
-          // Abaikan jika timeout
+          // Abaikan jika update DB gagal
         }
       }
 
